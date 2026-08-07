@@ -192,9 +192,10 @@ class ClientTunnel:
         self._on_log = cb
 
     def log(self, msg: str):
-        logger.info(msg)
         if self._on_log:
             self._on_log(msg)
+        else:
+            logger.info(msg)
 
     async def register_session(self, writer: asyncio.StreamWriter, host: str, port: int) -> bytes:
         sid = new_session_id()
@@ -290,9 +291,7 @@ class ClientTunnel:
             kwargs["content"] = b64u_encode(blob)
 
         try:
-            # Логируем детали запроса для отладки 403
-            self.log(f"DEBUG: Poll TS={ts} (device time: {time.ctime(now)})")
-            
+            logger.debug(f"Poll TS={ts} (device time: {time.ctime(now)})")
             resp = await self.http.request(self.poll_method, self.server_url, **kwargs)
             
             # Пытаемся синхронизировать время по заголовку Date от сервера
@@ -388,7 +387,7 @@ async def handle_socks_client(tunnel, reader, writer):
     try:
         host, port = await socks5_handshake(reader, writer)
     except Exception as e:
-        tunnel.log(f"socks handshake failed: {e}")
+        logger.debug(f"socks handshake failed from {peer}: {e}")
         writer.close()
         return
     sid = await tunnel.register_session(writer, host, port)
