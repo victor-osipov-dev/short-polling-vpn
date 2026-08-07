@@ -165,6 +165,7 @@ fun SimpleConfigTab(configManager: ConfigManager) {
     ) {
         ConfigTextField("Server URL", cfg.serverUrl) { save(cfg.copy(serverUrl = it)) }
         ConfigTextField("Poll Path", cfg.pollPath) { save(cfg.copy(pollPath = it)) }
+        ConfigTextField("Host header (optional)", cfg.hostHeader) { save(cfg.copy(hostHeader = it)) }
         ConfigTextField("PSK", cfg.psk, singleLine = false) { save(cfg.copy(psk = it)) }
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -425,10 +426,10 @@ fun SmallButton(text: String, onClick: () -> Unit) {
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
-            contentColor = MaterialTheme.colorScheme.onSurface
+            contentColor = Color.White
         )
     ) {
-        Text(text, fontSize = 11.sp)
+        Text(text, fontSize = 11.sp, color = Color.White)
     }
 }
 

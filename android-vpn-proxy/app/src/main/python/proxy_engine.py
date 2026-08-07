@@ -169,6 +169,7 @@ class ClientTunnel:
         self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
         self.poll_method = client_cfg.get("poll_method", "POST").upper()
         self.poll_data_in = client_cfg.get("poll_data_in", "body")
+        self.host_header = client_cfg.get("host_header") or None
         verify_tls = client_cfg.get("verify_tls", True)
 
         self.enc_key = derive_key(sec_cfg["psk"].strip())
@@ -277,7 +278,10 @@ class ClientTunnel:
 
         params = {"t": ts, "nonce": os.urandom(5).hex()}
         headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac}
-        
+
+        if self.host_header:
+            headers["Host"] = self.host_header
+
         if self.poll_data_in == "header":
             headers["X-Data"] = b64u_encode(blob)
 

@@ -13,6 +13,7 @@ data class ProxyConfig(
     val verifyTls: Boolean = true,
     val pollMethod: String = "POST",
     val pollDataIn: String = "body",
+    val hostHeader: String = "",
     val socksBindHost: String = "0.0.0.0",
     val socksBindPort: Int = 8888,
     val psk: String = "vTvesbK6BIh+ZPJf6pn4b+s7F+RvMi9ulrkFlPfX2qo=",
@@ -36,6 +37,7 @@ data class ProxyConfig(
                 put("verify_tls", verifyTls)
                 put("poll_method", pollMethod)
                 put("poll_data_in", pollDataIn)
+                put("host_header", hostHeader)
                 put("idle_timeout", JSONObject().apply {
                     put("enabled", idleTimeoutEnabled)
                     put("seconds", idleTimeoutSeconds)
@@ -74,6 +76,7 @@ class ConfigManager(private val context: Context) {
                 verifyTls = client.optBoolean("verify_tls", ProxyConfig().verifyTls),
                 pollMethod = client.optString("poll_method", ProxyConfig().pollMethod),
                 pollDataIn = client.optString("poll_data_in", ProxyConfig().pollDataIn),
+                hostHeader = client.optString("host_header", ""),
                 socksBindHost = socks.optString("bind_host", ProxyConfig().socksBindHost),
                 socksBindPort = socks.optInt("bind_port", ProxyConfig().socksBindPort),
                 psk = security.optString("psk", ProxyConfig().psk),
@@ -115,6 +118,7 @@ class ConfigManager(private val context: Context) {
                 verifyTls = client.optBoolean("verify_tls", ProxyConfig().verifyTls),
                 pollMethod = client.optString("poll_method", ProxyConfig().pollMethod),
                 pollDataIn = client.optString("poll_data_in", ProxyConfig().pollDataIn),
+                hostHeader = client.optString("host_header", ""),
                 socksBindHost = socks.optString("bind_host", ProxyConfig().socksBindHost),
                 socksBindPort = socks.optInt("bind_port", ProxyConfig().socksBindPort),
                 psk = security.optString("psk", ProxyConfig().psk),

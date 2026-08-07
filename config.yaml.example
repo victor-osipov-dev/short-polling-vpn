@@ -15,6 +15,7 @@ client:
   verify_tls: true
   poll_method: POST          # GET or POST
   poll_data_in: body         # body or header — куда класть d (зашифрованные данные)
+  host_header: ""            # необязательно: кастомный Host-заголовок (CDN/vhost/DNS)
   idle_timeout:
     enabled: false           # true — прекращать поллинг при отсутствии трафика
     seconds: 300             # через сколько секунд бездействия останавливать поллинг
