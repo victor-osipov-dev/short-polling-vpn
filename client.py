@@ -154,7 +154,7 @@ class ClientTunnel:
                              self.dns_bind_host, self.dns_bind_port, e)
                 self._dns_transport = None
 
-        self._dns_task = asyncio.create_task(_bind())
+        self._dns_task = loop.create_task(_bind())
 
     async def _handle_dns_query(self, data: bytes, addr):
         if len(data) < 12 or len(data) > 4096:
