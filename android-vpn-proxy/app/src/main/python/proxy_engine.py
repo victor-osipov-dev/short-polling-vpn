@@ -28,6 +28,10 @@ FLAG_DATA = 2
 FLAG_FIN = 4
 FLAG_DNS = 8
 SESSION_ID_LEN = 16
+# Клиент шлёт X-Proto: 2, сервер возвращает потоковый ответ:
+# magic + записи [2B len][AESGCM(кадр)], каждая расшифровывается независимо.
+PROTO_VERSION = "2"
+RESP_STREAM_MAGIC = b"\x02\x00"
 _FRAME_HEADER_FMT = "!16sIBI"
 _FRAME_HEADER_LEN = struct.calcsize(_FRAME_HEADER_FMT)
 
@@ -346,7 +350,7 @@ class ClientTunnel:
         mac = sign(self.hmac_key, self.client_id + ts.encode() + blob)
 
         params = {"t": ts, "nonce": os.urandom(5).hex()}
-        headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac}
+        headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac, "X-Proto": PROTO_VERSION}
 
         if self.host_header:
             headers["Host"] = self.host_header
@@ -360,22 +364,23 @@ class ClientTunnel:
 
         try:
             logger.debug(f"Poll TS={ts} (device time: {time.ctime(now)})")
-            resp = await self.http.request(self.poll_method, self.server_url, **kwargs)
-            
-            # Пытаемся синхронизировать время по заголовку Date от сервера
-            if "Date" in resp.headers:
-                try:
-                    import email.utils
-                    server_time = email.utils.parsedate_to_datetime(resp.headers["Date"]).timestamp()
-                    new_offset = int(server_time - (now - self.time_offset))
-                    if abs(new_offset - self.time_offset) > 2:
-                        self.log(f"Time sync: Server time drift is {new_offset}s. Adjusting...")
-                        self.time_offset = new_offset
-                except: pass
+            async with self.http.stream(self.poll_method, self.server_url, **kwargs) as resp:
+                # Пытаемся синхронизировать время по заголовку Date от сервера
+                if "Date" in resp.headers:
+                    try:
+                        import email.utils
+                        server_time = email.utils.parsedate_to_datetime(resp.headers["Date"]).timestamp()
+                        new_offset = int(server_time - (now - self.time_offset))
+                        if abs(new_offset - self.time_offset) > 2:
+                            self.log(f"Time sync: Server time drift is {new_offset}s. Adjusting...")
+                            self.time_offset = new_offset
+                    except:
+                        pass
 
-            if resp.status_code == 403:
-                self.log("ERROR 403: Forbidden. Check PSK and Time Sync!")
-            resp.raise_for_status()
+                if resp.status_code == 403:
+                    self.log("ERROR 403: Forbidden. Check PSK and Time Sync!")
+                resp.raise_for_status()
+                await self._handle_stream_response(resp)
         except Exception as e:
             if "403" in str(e):
                 pass # Already logged
@@ -383,49 +388,95 @@ class ClientTunnel:
                 self.log(f"poll request failed: {e}")
             return
 
-        body = resp.content
-        if body:
-            try:
-                incoming_batch = decrypt(self.enc_key, body)
-                incoming_frames = unpack_frames(incoming_batch)
-                await self._dispatch_incoming(incoming_frames)
-            except Exception as e:
-                logger.error(f"decrypt/unpack error: {e}")
-
-    async def _dispatch_incoming(self, frames):
+    async def _handle_stream_response(self, resp):
+        buf = bytearray()
+        mode = "unknown"  # unknown | stream | batch
+        first_record = True
         dns_replies = []
-        async with self.lock:
-            for f in frames:
-                if f.flags & FLAG_DNS:
-                    entry = self._dns_pending.pop(f.session_id, None)
-                    if entry:
-                        addr, _ts = entry
-                        dns_replies.append((addr, f.payload))
-                    else:
-                        logger.warning(f"[dns] no pending query for sid {f.session_id.hex()[:8]}")
+        records = 0
+        async for chunk in resp.aiter_bytes():
+            if not chunk:
+                continue
+            buf.extend(chunk)
+            if mode == "unknown" and len(buf) >= 2:
+                if bytes(buf[:2]) == RESP_STREAM_MAGIC:
+                    mode = "stream"
+                    del buf[:2]
+                else:
+                    mode = "batch"
+            if mode == "batch":
+                continue
+            while len(buf) >= 2:
+                rec_len = struct.unpack_from("!H", buf, 0)[0]
+                if rec_len == 0 or len(buf) < 2 + rec_len:
+                    break
+                record = bytes(buf[2:2 + rec_len])
+                del buf[:2 + rec_len]
+                try:
+                    plain = decrypt(self.enc_key, record)
+                    frame, _ = Frame.decode(plain, 0)
+                except Exception as e:
+                    if first_record:
+                        logger.warning(f"stream record decrypt failed, falling back to batch: {e}")
+                        mode = "batch"
+                        buf = bytearray(RESP_STREAM_MAGIC) + buf
+                        break
+                    logger.error(f"stream record error: {e}")
                     continue
-                sid = f.session_id.hex()[:8]
-                sess = self.sessions.get(f.session_id)
-                if not sess:
-                    continue
-                if (f.flags & FLAG_DATA) and f.payload:
-                    try:
-                        sess.writer.write(f.payload)
-                        await sess.writer.drain()
-                    except Exception:
-                        pass
-                    self._last_activity = time.monotonic()
-                if f.flags & FLAG_FIN:
-                    try:
-                        sess.writer.close()
-                    except Exception:
-                        pass
+                first_record = False
+                records += 1
+                async with self.lock:
+                    reply = await self._dispatch_single_frame(frame)
+                if reply:
+                    dns_replies.append(reply)
+        if mode == "batch":
+            body = bytes(buf)
+            if body:
+                try:
+                    incoming_batch = decrypt(self.enc_key, body)
+                    incoming_frames = unpack_frames(incoming_batch)
+                except Exception as e:
+                    logger.error(f"decrypt/unpack error: {e}")
+                else:
+                    async with self.lock:
+                        for f in incoming_frames:
+                            reply = await self._dispatch_single_frame(f)
+                            if reply:
+                                dns_replies.append(reply)
+        else:
+            logger.debug(f"got {records} stream records")
         for addr, payload in dns_replies:
             try:
                 self._dns_transport.sendto(payload, addr)
                 logger.debug(f"[dns] reply {len(payload)}B to {addr}")
             except Exception as e:
                 logger.error(f"[dns] failed to send reply to {addr}: {e}")
+
+    async def _dispatch_single_frame(self, f):
+        if f.flags & FLAG_DNS:
+            entry = self._dns_pending.pop(f.session_id, None)
+            if entry:
+                addr, _ts = entry
+                return (addr, f.payload)
+            logger.warning(f"[dns] no pending query for sid {f.session_id.hex()[:8]}")
+            return None
+        sid = f.session_id.hex()[:8]
+        sess = self.sessions.get(f.session_id)
+        if not sess:
+            return None
+        if (f.flags & FLAG_DATA) and f.payload:
+            try:
+                sess.writer.write(f.payload)
+                await sess.writer.drain()
+            except Exception:
+                pass
+            self._last_activity = time.monotonic()
+        if f.flags & FLAG_FIN:
+            try:
+                sess.writer.close()
+            except Exception:
+                pass
+        return None
 
     async def stop(self):
         self._stop = True

@@ -17,12 +17,14 @@ _pump_remote_to_buffer — так short polling не теряет данные �
 import asyncio
 import logging
 import socket
+import struct
 import time
 
 from aiohttp import web
 
 from protocol import (
     Frame, FLAG_NEW, FLAG_DATA, FLAG_FIN, FLAG_DNS,
+    PROTO_VERSION, RESP_STREAM_MAGIC,
     pack_frames, unpack_frames,
 )
 from crypto_utils import (
@@ -31,6 +33,30 @@ from crypto_utils import (
 )
 
 logger = logging.getLogger("vpn-server")
+
+# Максимальный payload одного рекорда в потоковом ответе (X-Proto: 2).
+# Рекорд = [2B длина][AESGCM(кадр)]; длина записи должна влезать в 2 байта,
+# т.е. 60000 + overhead(28) <= 65535. Мелкие рекорды позволяют клиенту
+# писать данные в SOCKS5 по мере поступления, а не после полной загрузки
+# огромного тела ответа (лечит WinError 64 на больших ответах).
+STREAM_RECORD_SIZE = 60000
+
+
+def build_stream_response(enc_key, frames) -> bytes:
+    """Собирает потоковый ответ: magic + записи [2B len][AESGCM(кадр)].
+    Крупные DATA-кадры режутся на рекорды по STREAM_RECORD_SIZE, чтобы
+    клиент мог расшифровывать и отдавать их частями по мере скачивания."""
+    out = bytearray(RESP_STREAM_MAGIC)
+    for f in frames:
+        if (f.flags & FLAG_DATA) and len(f.payload) > STREAM_RECORD_SIZE:
+            for i in range(0, len(f.payload), STREAM_RECORD_SIZE):
+                chunk = f.payload[i:i + STREAM_RECORD_SIZE]
+                rec = encrypt(enc_key, Frame(f.session_id, f.seq, FLAG_DATA, chunk).encode())
+                out += struct.pack("!H", len(rec)) + rec
+        else:
+            rec = encrypt(enc_key, f.encode())
+            out += struct.pack("!H", len(rec)) + rec
+    return bytes(out)
 
 
 def enable_tcp_keepalive(transport) -> None:
@@ -343,6 +369,11 @@ async def poll_handler(request: web.Request):
     mgr: SessionManager = app["session_mgr"]
     await mgr.handle_incoming(client_id, frames)
     out_frames = await mgr.collect_outgoing(client_id)
+
+    if request.headers.get("X-Proto", "1") == PROTO_VERSION:
+        # Потоковый формат: magic + независимо зашифрованные рекорды.
+        return web.Response(body=build_stream_response(enc_key, out_frames),
+                            content_type="application/octet-stream")
 
     resp_batch = pack_frames(out_frames)
     resp_blob = encrypt(enc_key, resp_batch)

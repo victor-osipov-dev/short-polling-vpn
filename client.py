@@ -24,6 +24,7 @@ import httpx
 
 from protocol import (
     Frame, FLAG_NEW, FLAG_DATA, FLAG_FIN, FLAG_DNS,
+    PROTO_VERSION, RESP_STREAM_MAGIC,
     pack_frames, unpack_frames, new_session_id,
 )
 from crypto_utils import (
@@ -240,7 +241,7 @@ class ClientTunnel:
         mac = sign(self.hmac_key, self.client_id + ts.encode() + blob)
 
         params = {"t": ts, "nonce": os.urandom(5).hex()}
-        headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac}
+        headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac, "X-Proto": PROTO_VERSION}
         if self.host_header:
             headers["Host"] = self.host_header
         if self.poll_data_in == "header":
@@ -253,61 +254,114 @@ class ClientTunnel:
         logger.debug(f"[client] poll: {self.poll_method} data_in={self.poll_data_in} "
                      f"{len(frames_to_send)} frames, {len(blob)}B blob")
         try:
-            resp = await self.http.request(self.poll_method, self.server_url, **kwargs)
-            resp.raise_for_status()
+            async with self.http.stream(self.poll_method, self.server_url, **kwargs) as resp:
+                resp.raise_for_status()
+                await self._handle_stream_response(resp)
         except Exception as e:
             logger.error(f"[client] poll request failed: {e}")
             return
-            
-        body = resp.content
-        logger.debug(f"[client] poll: got response {len(body)} bytes")
-        if body:
-            try:
-                incoming_batch = decrypt(self.enc_key, body)
-                incoming_frames = unpack_frames(incoming_batch)
-                logger.debug(f"[client] poll: got {len(incoming_frames)} frames from server")
-                await self._dispatch_incoming(incoming_frames)
-            except Exception as e:
-                logger.error(f"[client] poll: decrypt/unpack error: {e}")
 
-    async def _dispatch_incoming(self, frames):
-        logger.debug(f"[client] got {len(frames)} frames from server")
+    async def _handle_stream_response(self, resp):
+        """Потоково читает ответ: magic + записи [2B len][AESGCM(кадр)].
+        Каждый рекорд расшифровывается и раздаётся в SOCKS5 по мере прихода,
+        не дожидаясь всего тела ответа. Если magic не найден — старый формат
+        (один зашифрованный батч), обрабатываем целиком по завершении стрима."""
+        buf = bytearray()
+        mode = "unknown"  # unknown | stream | batch
+        first_record = True
         dns_replies = []
-        async with self.lock:
-            for f in frames:
-                if f.flags & FLAG_DNS:
-                    entry = self._dns_pending.pop(f.session_id, None)
-                    if entry:
-                        addr, _ts = entry
-                        dns_replies.append((addr, f.payload))
-                    else:
-                        logger.warning(f"[dns] no pending query for sid {f.session_id.hex()[:8]}")
+        records = 0
+        async for chunk in resp.aiter_bytes():
+            if not chunk:
+                continue
+            buf.extend(chunk)
+            if mode == "unknown" and len(buf) >= 2:
+                if bytes(buf[:2]) == RESP_STREAM_MAGIC:
+                    mode = "stream"
+                    del buf[:2]
+                else:
+                    mode = "batch"
+            if mode == "batch":
+                continue
+            while len(buf) >= 2:
+                rec_len = struct.unpack_from("!H", buf, 0)[0]
+                if rec_len == 0 or len(buf) < 2 + rec_len:
+                    break
+                record = bytes(buf[2:2 + rec_len])
+                del buf[:2 + rec_len]
+                try:
+                    plain = decrypt(self.enc_key, record)
+                    frame, _ = Frame.decode(plain, 0)
+                except Exception as e:
+                    if first_record:
+                        # Не исключено, что случайный nonce старого формата совпал
+                        # с magic — откатываемся к побайтовому (batch) режиму.
+                        logger.warning(f"[client] stream record decrypt failed, "
+                                       f"falling back to batch: {e}")
+                        mode = "batch"
+                        buf = bytearray(RESP_STREAM_MAGIC) + buf
+                        break
+                    logger.error(f"[client] stream record error: {e}")
                     continue
-                sid = f.session_id.hex()[:8]
-                sess = self.sessions.get(f.session_id)
-                if not sess:
-                    logger.warning(f"[client] session {sid} not found")
-                    continue
-                if (f.flags & FLAG_DATA) and f.payload:
-                    try:
-                        logger.debug(f"[client] session {sid} writing {len(f.payload)} bytes to SOCKS5")
-                        sess.writer.write(f.payload)
-                        await sess.writer.drain()
-                    except Exception as e:
-                        logger.error(f"[client] session {sid} write error: {e}")
-                    self._last_activity = time.monotonic()
-                if f.flags & FLAG_FIN:
-                    logger.info(f"[client] session {sid} FIN received")
-                    try:
-                        sess.writer.close()
-                    except Exception:
-                        pass
+                first_record = False
+                records += 1
+                async with self.lock:
+                    reply = await self._dispatch_single_frame(frame)
+                if reply:
+                    dns_replies.append(reply)
+        if mode == "batch":
+            body = bytes(buf)
+            if body:
+                try:
+                    incoming_batch = decrypt(self.enc_key, body)
+                    incoming_frames = unpack_frames(incoming_batch)
+                except Exception as e:
+                    logger.error(f"[client] poll: decrypt/unpack error: {e}")
+                else:
+                    async with self.lock:
+                        for f in incoming_frames:
+                            reply = await self._dispatch_single_frame(f)
+                            if reply:
+                                dns_replies.append(reply)
+        else:
+            logger.debug(f"[client] poll: got {records} stream records")
         for addr, payload in dns_replies:
             try:
                 self._dns_transport.sendto(payload, addr)
                 logger.debug(f"[dns] reply {len(payload)}B to {addr}")
             except Exception as e:
                 logger.error(f"[dns] failed to send reply to {addr}: {e}")
+
+    async def _dispatch_single_frame(self, f):
+        """Обрабатывает один входящий кадр. Возвращает (addr, payload) для
+        DNS-ответа либо None."""
+        if f.flags & FLAG_DNS:
+            entry = self._dns_pending.pop(f.session_id, None)
+            if entry:
+                addr, _ts = entry
+                return (addr, f.payload)
+            logger.warning(f"[dns] no pending query for sid {f.session_id.hex()[:8]}")
+            return None
+        sid = f.session_id.hex()[:8]
+        sess = self.sessions.get(f.session_id)
+        if not sess:
+            logger.warning(f"[client] session {sid} not found")
+            return None
+        if (f.flags & FLAG_DATA) and f.payload:
+            try:
+                logger.debug(f"[client] session {sid} writing {len(f.payload)} bytes to SOCKS5")
+                sess.writer.write(f.payload)
+                await sess.writer.drain()
+            except Exception as e:
+                logger.error(f"[client] session {sid} write error: {e}")
+            self._last_activity = time.monotonic()
+        if f.flags & FLAG_FIN:
+            logger.info(f"[client] session {sid} FIN received")
+            try:
+                sess.writer.close()
+            except Exception:
+                pass
+        return None
 
     async def stop(self):
         self._stop = True
