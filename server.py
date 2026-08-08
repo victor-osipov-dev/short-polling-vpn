@@ -16,6 +16,7 @@ _pump_remote_to_buffer — так short polling не теряет данные �
 
 import asyncio
 import logging
+import socket
 import time
 
 from aiohttp import web
@@ -30,6 +31,24 @@ from crypto_utils import (
 )
 
 logger = logging.getLogger("vpn-server")
+
+
+def enable_tcp_keepalive(transport) -> None:
+    """Включает TCP keepalive на сокете, чтобы idle-соединения не резались
+    таймаутами, а реально мёртвые — закрывались ОС."""
+    sock = transport.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 15)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 4)
+    except OSError:
+        pass
 
 
 class ServerSession:
@@ -125,6 +144,7 @@ class SessionManager:
             self._cleanup_pending(client_id, session_id)
             return
         sess = ServerSession(session_id, writer)
+        enable_tcp_keepalive(writer.transport)
 
         buffered = []
         async with self.lock:
@@ -168,17 +188,15 @@ class SessionManager:
         sid = sess.session_id.hex()[:8]
         try:
             while True:
-                try:
-                    data = await asyncio.wait_for(reader.read(self.max_chunk_bytes), timeout=30)
-                except asyncio.TimeoutError:
-                    logger.debug(f"[server] pump timeout for session {sid}")
-                    break
+                data = await reader.read(self.max_chunk_bytes)
                 if not data:
                     logger.info(f"[server] session {sid} got EOF from remote")
                     break
                 logger.debug(f"[server] pump: session {sid} buffered {len(data)} bytes from remote")
                 async with self.lock:
                     sess.incoming.extend(data)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"[server] pump error for session {sid}: {e}")
         finally:

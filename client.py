@@ -323,6 +323,24 @@ class ClientTunnel:
 SOCKS_VERSION = 0x05
 
 
+def enable_tcp_keepalive(transport) -> None:
+    """Включает TCP keepalive на сокете, чтобы idle-соединения не резались
+    таймаутами, а реально мёртвые — закрывались ОС."""
+    sock = transport.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 15)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 4)
+    except OSError:
+        pass
+
+
 async def _socks5_handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     """Минимальный SOCKS5: без аутентификации, только CONNECT."""
     header = await reader.readexactly(2)
@@ -374,19 +392,20 @@ async def handle_socks_client(tunnel: ClientTunnel, reader: asyncio.StreamReader
 
     sid = await tunnel.register_session(writer, host, port)
     logger.info(f"socks5: registered session {sid.hex()[:8]} -> {host}:{port}")
-    
+    enable_tcp_keepalive(writer.transport)
+
     async def read_from_socks5():
         """Фоновый цикл: читает из SOCKS5 клиента, пишет в туннель"""
         try:
             while True:
-                data = await asyncio.wait_for(reader.read(4096), timeout=30)
+                data = await reader.read(4096)
                 if not data:
                     logger.info(f"socks5: {sid.hex()[:8]} got EOF from client")
                     break
                 logger.debug(f"socks5: {sid.hex()[:8]} read {len(data)} bytes from client")
                 await tunnel.feed_outgoing(sid, data)
-        except asyncio.TimeoutError:
-            logger.debug(f"socks5: {sid.hex()[:8]} read timeout")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"socks5: {sid.hex()[:8]} read error: {e}")
         finally:

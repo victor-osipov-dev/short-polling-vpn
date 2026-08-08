@@ -439,6 +439,22 @@ class ClientTunnel:
 
 SOCKS_VERSION = 0x05
 
+
+def _enable_tcp_keepalive(transport):
+    sock = transport.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 15)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 4)
+    except OSError:
+        pass
+
 async def socks5_handshake(reader, writer):
     header = await reader.readexactly(2)
     ver, nmethods = header
@@ -478,16 +494,17 @@ async def handle_socks_client(tunnel, reader, writer):
         writer.close()
         return
     sid = await tunnel.register_session(writer, host, port)
+    _enable_tcp_keepalive(writer.transport)
 
     async def read_loop():
         try:
             while True:
-                data = await asyncio.wait_for(reader.read(4096), timeout=30)
+                data = await reader.read(4096)
                 if not data:
                     break
                 await tunnel.feed_outgoing(sid, data)
-        except asyncio.TimeoutError:
-            pass
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             tunnel.log(f"socks read error: {e}")
         finally:
