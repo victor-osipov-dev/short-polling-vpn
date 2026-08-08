@@ -40,22 +40,30 @@ logger = logging.getLogger("vpn-server")
 # писать данные в SOCKS5 по мере поступления, а не после полной загрузки
 # огромного тела ответа (лечит WinError 64 на больших ответах).
 STREAM_RECORD_SIZE = 60000
+AES_GCM_OVERHEAD = 12 + 16  # nonce + tag
 
 
-def build_stream_response(enc_key, frames) -> bytes:
-    """Собирает потоковый ответ: magic + записи [2B len][AESGCM(кадр)].
-    Крупные DATA-кадры режутся на рекорды по STREAM_RECORD_SIZE, чтобы
-    клиент мог расшифровывать и отдавать их частями по мере скачивания."""
-    out = bytearray(RESP_STREAM_MAGIC)
+def iter_stream_records(frames):
+    """Генерирует зашифрованно-сырые plaintext каждого рекорда потокового
+    ответа (без шифрования). Крупные DATA-кадры режутся на рекорды по
+    STREAM_RECORD_SIZE."""
     for f in frames:
         if (f.flags & FLAG_DATA) and len(f.payload) > STREAM_RECORD_SIZE:
             for i in range(0, len(f.payload), STREAM_RECORD_SIZE):
                 chunk = f.payload[i:i + STREAM_RECORD_SIZE]
-                rec = encrypt(enc_key, Frame(f.session_id, f.seq, FLAG_DATA, chunk).encode())
-                out += struct.pack("!H", len(rec)) + rec
+                yield Frame(f.session_id, f.seq, FLAG_DATA, chunk).encode()
         else:
-            rec = encrypt(enc_key, f.encode())
-            out += struct.pack("!H", len(rec)) + rec
+            yield f.encode()
+
+
+def build_stream_response(enc_key, frames) -> bytes:
+    """Собирает потоковый ответ целиком: magic + записи [2B len][AESGCM(кадр)].
+    Используется в тестах; на проде ответ стримится по частям, чтобы не держать
+    в памяти весь ответ (лечит OOM на больших закачках)."""
+    out = bytearray(RESP_STREAM_MAGIC)
+    for plain in iter_stream_records(frames):
+        rec = encrypt(enc_key, plain)
+        out += struct.pack("!H", len(rec)) + rec
     return bytes(out)
 
 
@@ -98,6 +106,7 @@ class SessionManager:
         self.last_seen: dict = {}  # client_id -> monotonic timestamp
         self.lock = asyncio.Lock()
         self.max_chunk_bytes = max_chunk_bytes
+        self._incoming_cap = max_chunk_bytes * 2  # мягкий предел буфера сессии (backpressure)
         self.idle_timeout = idle_timeout
         self._pending_opens: dict[bytes, set[bytes]] = {}
         self._pending_data: dict[bytes, dict[bytes, list[bytes]]] = {}
@@ -214,6 +223,14 @@ class SessionManager:
         sid = sess.session_id.hex()[:8]
         try:
             while True:
+                # Backpressure: не читаем из remote, пока клиент не забрал
+                # накопленное — иначе буфер сессии растёт безгранично (OOM).
+                while True:
+                    async with self.lock:
+                        full = len(sess.incoming) > self._incoming_cap
+                    if not full:
+                        break
+                    await asyncio.sleep(0.05)
                 data = await reader.read(self.max_chunk_bytes)
                 if not data:
                     logger.info(f"[server] session {sid} got EOF from remote")
@@ -226,7 +243,8 @@ class SessionManager:
         except Exception as e:
             logger.error(f"[server] pump error for session {sid}: {e}")
         finally:
-            sess.fin_pending = True
+            async with self.lock:
+                sess.fin_pending = True
             logger.info(f"[server] pump finished for session {sid}")
 
     async def _resolve_dns(self, client_id: bytes, session_id: bytes, query: bytes):
@@ -372,8 +390,20 @@ async def poll_handler(request: web.Request):
 
     if request.headers.get("X-Proto", "1") == PROTO_VERSION:
         # Потоковый формат: magic + независимо зашифрованные рекорды.
-        return web.Response(body=build_stream_response(enc_key, out_frames),
-                            content_type="application/octet-stream")
+        # Стримим по частям с заранее известным Content-Length, чтобы не держать
+        # весь ответ в памяти (OOM на больших закачках при 1GB RAM сервера).
+        total = len(RESP_STREAM_MAGIC) + sum(
+            2 + len(plain) + AES_GCM_OVERHEAD for plain in iter_stream_records(out_frames)
+        )
+        resp = web.StreamResponse(status=200)
+        resp.content_type = "application/octet-stream"
+        resp.content_length = total
+        await resp.prepare(request)
+        await resp.write(RESP_STREAM_MAGIC)
+        for plain in iter_stream_records(out_frames):
+            rec = encrypt(enc_key, plain)
+            await resp.write(struct.pack("!H", len(rec)) + rec)
+        return resp
 
     resp_batch = pack_frames(out_frames)
     resp_blob = encrypt(enc_key, resp_batch)
@@ -386,7 +416,13 @@ def build_app(cfg: dict) -> web.Application:
     sec_cfg = cfg["security"]
     server_cfg = cfg["server"]
 
-    app = web.Application()
+    # aiohttp по умолчанию отклоняет тела запросов > 1MB (413). Клиент шлёт
+    # исходящие данные (до max_chunk_bytes на сессию, base64+шифрование ~1.5x)
+    # в теле poll-запроса — поднимаем лимит с запасом на несколько сессий.
+    max_chunk = int(server_cfg.get("max_chunk_bytes", 4096))
+    client_max = max(max_chunk * 3, 16 * 1024 * 1024)
+
+    app = web.Application(client_max_size=client_max)
     app["enc_key"] = derive_key(sec_cfg["psk"])
     app["hmac_key"] = derive_hmac_key(sec_cfg["psk"])
     app["hmac_window_seconds"] = int(sec_cfg.get("hmac_window_seconds", 30))
