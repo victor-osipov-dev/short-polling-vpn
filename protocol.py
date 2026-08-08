@@ -26,6 +26,7 @@ import struct
 FLAG_NEW = 0x01   # открыть новую сессию: payload = host_len(1) + host + port(2)
 FLAG_DATA = 0x02  # обычные данные
 FLAG_FIN = 0x04   # закрыть сессию (данные закончились / соединение разорвано)
+FLAG_DNS = 0x08   # DNS-запрос/ответ: payload = raw DNS query/response
 
 SESSION_ID_LEN = 16
 _HEADER_FMT = "!16sIBI"

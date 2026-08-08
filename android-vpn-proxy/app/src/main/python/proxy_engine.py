@@ -26,6 +26,7 @@ logger = logging.getLogger("proxy")
 FLAG_NEW = 1
 FLAG_DATA = 2
 FLAG_FIN = 4
+FLAG_DNS = 8
 SESSION_ID_LEN = 16
 _FRAME_HEADER_FMT = "!16sIBI"
 _FRAME_HEADER_LEN = struct.calcsize(_FRAME_HEADER_FMT)
@@ -188,6 +189,16 @@ class ClientTunnel:
         self._on_log = None
         self.time_offset = 0
 
+        dns_cfg = client_cfg.get("dns_relay", {})
+        self.dns_relay_enabled = dns_cfg.get("enabled", False)
+        self.dns_bind_host = dns_cfg.get("bind_host", "127.0.0.1")
+        self.dns_bind_port = int(dns_cfg.get("bind_port", 5353))
+        self._dns_pending: dict = {}
+        self._dns_outbox: list = []
+        self._dns_transport = None
+        self._dns_protocol = None
+        self._dns_task = None
+
     def set_log_callback(self, cb):
         self._on_log = cb
 
@@ -221,6 +232,60 @@ class ClientTunnel:
             if sess:
                 sess.closed = True
 
+    # ── DNS relay ─────────────────────────────────────────────────────
+
+    def _start_dns_relay(self):
+        if not self.dns_relay_enabled:
+            return
+        loop = asyncio.get_event_loop()
+
+        class DnsUdpProtocol(asyncio.DatagramProtocol):
+            def __init__(self, owner):
+                self.owner = owner
+
+            def datagram_received(self, data, addr):
+                asyncio.create_task(self.owner._handle_dns_query(data, addr))
+
+            def error_received(self, exc):
+                logger.warning(f"dns relay udp error: {exc}")
+
+        self._dns_protocol = DnsUdpProtocol(self)
+
+        async def _bind():
+            try:
+                self._dns_transport, _ = await loop.create_datagram_endpoint(
+                    lambda: self._dns_protocol,
+                    local_addr=(self.dns_bind_host, self.dns_bind_port),
+                )
+                self.log(f"DNS relay listening on {self.dns_bind_host}:{self.dns_bind_port}")
+            except Exception as e:
+                logger.error(f"failed to start DNS relay on {self.dns_bind_host}:{self.dns_bind_port}: {e}")
+                self._dns_transport = None
+
+        self._dns_task = asyncio.create_task(_bind())
+
+    async def _handle_dns_query(self, data: bytes, addr):
+        if len(data) < 12 or len(data) > 4096:
+            return
+        sid = new_session_id()
+        frame = Frame(sid, 0, FLAG_DNS, data)
+        async with self.lock:
+            self._dns_pending[sid] = (addr, time.monotonic())
+        logger.debug(f"[dns] queued {len(data)}B query from {addr}")
+        self._last_activity = time.monotonic()
+        await self._enqueue_dns_frame(frame)
+
+    async def _enqueue_dns_frame(self, frame: Frame):
+        async with self.lock:
+            self._dns_outbox.append(frame)
+
+    def _prune_dns_pending(self):
+        now = time.monotonic()
+        expired = [sid for sid, (_, ts) in self._dns_pending.items()
+                   if now - ts > 30]
+        for sid in expired:
+            del self._dns_pending[sid]
+
     async def poll_loop(self):
         while not self._stop:
             if self.idle_timeout_enabled:
@@ -252,7 +317,6 @@ class ClientTunnel:
     async def _poll_once(self):
         frames_to_send = []
         async with self.lock:
-            # ... (предыдущий код сбора фреймов остается без изменений)
             dead_sids = []
             for sid, sess in self.sessions.items():
                 if sess.pending_new is not None:
@@ -268,6 +332,10 @@ class ClientTunnel:
                     dead_sids.append(sid)
             for sid in dead_sids:
                 del self.sessions[sid]
+            if self._dns_outbox:
+                frames_to_send.extend(self._dns_outbox)
+                self._dns_outbox = []
+            self._prune_dns_pending()
 
         batch = pack_frames(frames_to_send)
         blob = encrypt(self.enc_key, batch)
@@ -325,8 +393,17 @@ class ClientTunnel:
                 logger.error(f"decrypt/unpack error: {e}")
 
     async def _dispatch_incoming(self, frames):
+        dns_replies = []
         async with self.lock:
             for f in frames:
+                if f.flags & FLAG_DNS:
+                    entry = self._dns_pending.pop(f.session_id, None)
+                    if entry:
+                        addr, _ts = entry
+                        dns_replies.append((addr, f.payload))
+                    else:
+                        logger.warning(f"[dns] no pending query for sid {f.session_id.hex()[:8]}")
+                    continue
                 sid = f.session_id.hex()[:8]
                 sess = self.sessions.get(f.session_id)
                 if not sess:
@@ -343,9 +420,19 @@ class ClientTunnel:
                         sess.writer.close()
                     except Exception:
                         pass
+        for addr, payload in dns_replies:
+            try:
+                self._dns_transport.sendto(payload, addr)
+                logger.debug(f"[dns] reply {len(payload)}B to {addr}")
+            except Exception as e:
+                logger.error(f"[dns] failed to send reply to {addr}: {e}")
 
     async def stop(self):
         self._stop = True
+        if self._dns_task:
+            self._dns_task.cancel()
+        if self._dns_transport:
+            self._dns_transport.close()
         await self.http.aclose()
 
 # ── SOCKS5 ────────────────────────────────────────────────────────────
@@ -474,6 +561,8 @@ def _run(config_path: str, log_cb):
 
         _tunnel = ClientTunnel(cfg)
         _tunnel.set_log_callback(log_cb)
+
+        _tunnel._start_dns_relay()
 
         socks_cfg = cfg["client"]["socks5"]
         poll_task = _loop.create_task(_tunnel.poll_loop())

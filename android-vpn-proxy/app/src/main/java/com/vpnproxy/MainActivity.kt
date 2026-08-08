@@ -242,6 +242,20 @@ fun SimpleConfigTab(configManager: ConfigManager) {
                 keyboardType = KeyboardType.Number
             ) { it.toIntOrNull()?.let { v -> save(cfg.copy(idleTimeoutSeconds = v)) } }
         }
+
+        Text("DNS relay:",
+             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Enabled:", color = MaterialTheme.colorScheme.onSurface)
+            Switch(checked = cfg.dnsRelayEnabled,
+                onCheckedChange = { save(cfg.copy(dnsRelayEnabled = it)) })
+            Spacer(Modifier.weight(1f))
+            ConfigTextField("Port", cfg.dnsBindPort.toString(),
+                modifier = Modifier.width(120.dp).weight(1f),
+                keyboardType = KeyboardType.Number
+            ) { it.toIntOrNull()?.let { v -> save(cfg.copy(dnsBindPort = v)) } }
+        }
     }
 }
 

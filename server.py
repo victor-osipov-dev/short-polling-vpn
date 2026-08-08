@@ -21,7 +21,7 @@ import time
 from aiohttp import web
 
 from protocol import (
-    Frame, FLAG_NEW, FLAG_DATA, FLAG_FIN,
+    Frame, FLAG_NEW, FLAG_DATA, FLAG_FIN, FLAG_DNS,
     pack_frames, unpack_frames,
 )
 from crypto_utils import (
@@ -47,7 +47,8 @@ class ServerSession:
 
 
 class SessionManager:
-    def __init__(self, max_chunk_bytes: int, idle_timeout: int):
+    def __init__(self, max_chunk_bytes: int, idle_timeout: int, dns_resolver: str = "8.8.8.8",
+                 dns_port: int = 53):
         self.clients: dict = {}   # client_id -> {session_id: ServerSession}
         self.last_seen: dict = {}  # client_id -> monotonic timestamp
         self.lock = asyncio.Lock()
@@ -55,6 +56,9 @@ class SessionManager:
         self.idle_timeout = idle_timeout
         self._pending_opens: dict[bytes, set[bytes]] = {}
         self._pending_data: dict[bytes, dict[bytes, list[bytes]]] = {}
+        self._dns_replies: dict[bytes, dict[bytes, bytes]] = {}  # client_id -> {sid: dns_response}
+        self._dns_resolver_host = dns_resolver
+        self._dns_resolver_port = dns_port
 
     async def handle_incoming(self, client_id: bytes, frames):
         cid = client_id.hex()[:8]
@@ -71,6 +75,9 @@ class SessionManager:
                 async with self.lock:
                     self._pending_opens.setdefault(client_id, set()).add(f.session_id)
                 asyncio.create_task(self._open_remote(client_id, f.session_id, host, port))
+            elif f.flags & FLAG_DNS:
+                logger.info(f"[server] DNS: client {cid} query {len(f.payload)}B (sid {sid})")
+                asyncio.create_task(self._resolve_dns(client_id, f.session_id, f.payload))
             elif f.flags & FLAG_DATA:
                 async with self.lock:
                     sess = self.clients.get(client_id, {}).get(f.session_id)
@@ -178,9 +185,47 @@ class SessionManager:
             sess.fin_pending = True
             logger.info(f"[server] pump finished for session {sid}")
 
+    async def _resolve_dns(self, client_id: bytes, session_id: bytes, query: bytes):
+        """Резолвит raw DNS-запрос через dns_resolver и кладёт ответ в outbox клиента."""
+        try:
+            loop = asyncio.get_event_loop()
+            fut = loop.create_future()
+
+            class _Proto(asyncio.DatagramProtocol):
+                def datagram_received(self, data, addr):
+                    if not fut.done():
+                        fut.set_result(data)
+
+                def error_received(self, exc):
+                    if not fut.done():
+                        fut.set_exception(exc)
+
+            transport, _ = await loop.create_datagram_endpoint(
+                lambda: _Proto(),
+                remote_addr=(self._dns_resolver_host, self._dns_resolver_port),
+            )
+            try:
+                transport.sendto(query)
+                reply = await asyncio.wait_for(fut, timeout=10)
+            finally:
+                transport.close()
+        except Exception as e:
+            logger.error(f"[server] DNS resolve failed for sid {session_id.hex()[:8]}: {e}")
+            return
+
+        if len(reply) < 12 or not reply:
+            logger.warning(f"[server] DNS bad reply for sid {session_id.hex()[:8]}: {len(reply)}B")
+            return
+        async with self.lock:
+            self._dns_replies.setdefault(client_id, {})[session_id] = reply
+        logger.debug(f"[server] DNS reply {len(reply)}B stored for sid {session_id.hex()[:8]}")
+
     async def collect_outgoing(self, client_id: bytes):
         frames = []
         async with self.lock:
+            dns_replies = self._dns_replies.pop(client_id, {})
+            for sid, payload in dns_replies.items():
+                frames.append(Frame(sid, 0, FLAG_DNS, payload))
             sessions = self.clients.get(client_id, {})
             dead = []
             for sid, sess in sessions.items():
@@ -212,6 +257,7 @@ class SessionManager:
                             pass
                     self.clients.pop(cid, None)
                     self.last_seen.pop(cid, None)
+                    self._dns_replies.pop(cid, None)
                     logger.info("reaped idle client %s", cid.hex()[:8])
 
 
@@ -298,6 +344,8 @@ def build_app(cfg: dict) -> web.Application:
     app["session_mgr"] = SessionManager(
         max_chunk_bytes=int(server_cfg.get("max_chunk_bytes", 4096)),
         idle_timeout=int(server_cfg.get("idle_timeout_seconds", 120)),
+        dns_resolver=str(server_cfg.get("dns_resolver", "8.8.8.8")),
+        dns_port=int(server_cfg.get("dns_resolver_port", 53)),
     )
     poll_path = server_cfg.get("poll_path", "/poll")
     app.router.add_route("GET", poll_path, poll_handler)

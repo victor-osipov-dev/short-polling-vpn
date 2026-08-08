@@ -19,6 +19,10 @@ client:
   idle_timeout:
     enabled: false           # true — прекращать поллинг при отсутствии трафика
     seconds: 300             # через сколько секунд бездействия останавливать поллинг
+  dns_relay:
+    enabled: false           # true — слушать локальный UDP для DNS и шлёть запросы через туннель
+    bind_host: 127.0.0.1
+    bind_port: 5353          # 5353 (без root); 53 — только с root/iptables-перехватом
 
 server:
   bind_host: 0.0.0.0
@@ -26,6 +30,8 @@ server:
   poll_path: "/poll"          # путь VPN-ручки (можно сменить для маскировки)
   max_chunk_bytes: 4096
   idle_timeout_seconds: 200
+  dns_resolver: "8.8.8.8"    # куда сервер пересылает DNS-запросы (IP или hostname)
+  dns_resolver_port: 53
   tls:
     cert: "/path/to/fullchain.pem"
     key: "/path/to/privkey.pem"

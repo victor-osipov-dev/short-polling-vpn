@@ -20,6 +20,9 @@ data class ProxyConfig(
     val hmacWindowSeconds: Int = 30,
     val idleTimeoutEnabled: Boolean = false,
     val idleTimeoutSeconds: Int = 300,
+    val dnsRelayEnabled: Boolean = false,
+    val dnsBindHost: String = "127.0.0.1",
+    val dnsBindPort: Int = 5353,
 ) {
     fun toJson(): JSONObject {
         return JSONObject().apply {
@@ -41,6 +44,11 @@ data class ProxyConfig(
                 put("idle_timeout", JSONObject().apply {
                     put("enabled", idleTimeoutEnabled)
                     put("seconds", idleTimeoutSeconds)
+                })
+                put("dns_relay", JSONObject().apply {
+                    put("enabled", dnsRelayEnabled)
+                    put("bind_host", dnsBindHost)
+                    put("bind_port", dnsBindPort)
                 })
             })
             put("security", JSONObject().apply {
@@ -67,6 +75,7 @@ class ConfigManager(private val context: Context) {
             val socks = client.getJSONObject("socks5")
             val security = json.getJSONObject("security")
             val idleTimeout = client.optJSONObject("idle_timeout") ?: JSONObject()
+            val dnsRelay = client.optJSONObject("dns_relay") ?: JSONObject()
             ProxyConfig(
                 serverUrl = client.optString("server_url", ProxyConfig().serverUrl),
                 pollPath = client.optString("poll_path", ProxyConfig().pollPath),
@@ -83,6 +92,9 @@ class ConfigManager(private val context: Context) {
                 hmacWindowSeconds = security.optInt("hmac_window_seconds", ProxyConfig().hmacWindowSeconds),
                 idleTimeoutEnabled = idleTimeout.optBoolean("enabled", false),
                 idleTimeoutSeconds = idleTimeout.optInt("seconds", 300),
+                dnsRelayEnabled = dnsRelay.optBoolean("enabled", false),
+                dnsBindHost = dnsRelay.optString("bind_host", "127.0.0.1"),
+                dnsBindPort = dnsRelay.optInt("bind_port", 5353),
             )
         } catch (_: Exception) {
             ProxyConfig()
@@ -109,6 +121,7 @@ class ConfigManager(private val context: Context) {
             val socks = client.getJSONObject("socks5")
             val security = obj.getJSONObject("security")
             val idleTimeout = client.optJSONObject("idle_timeout") ?: JSONObject()
+            val dnsRelay = client.optJSONObject("dns_relay") ?: JSONObject()
             ProxyConfig(
                 serverUrl = client.optString("server_url", ProxyConfig().serverUrl),
                 pollPath = client.optString("poll_path", ProxyConfig().pollPath),
@@ -125,6 +138,9 @@ class ConfigManager(private val context: Context) {
                 hmacWindowSeconds = security.optInt("hmac_window_seconds", ProxyConfig().hmacWindowSeconds),
                 idleTimeoutEnabled = idleTimeout.optBoolean("enabled", false),
                 idleTimeoutSeconds = idleTimeout.optInt("seconds", 300),
+                dnsRelayEnabled = dnsRelay.optBoolean("enabled", false),
+                dnsBindHost = dnsRelay.optString("bind_host", "127.0.0.1"),
+                dnsBindPort = dnsRelay.optInt("bind_port", 5353),
             )
         } catch (_: Exception) {
             null
