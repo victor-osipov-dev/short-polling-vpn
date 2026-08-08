@@ -90,6 +90,7 @@ class ClientTunnel:
         self.dns_bind_port = int(dns_cfg.get("bind_port", 5353))
         self._dns_pending: dict = {}  # sid -> (addr, ts)
         self._dns_outbox: list = []   # FLAG_DNS frames awaiting next poll
+        self._fin_outbox: list = []   # sid'ы мёртвых сессий, для которых нужно отправить FIN серверу
         self._dns_transport = None
         self._dns_protocol = None
         self._dns_task = None
@@ -230,6 +231,11 @@ class ClientTunnel:
                     logger.debug(f"[client] sending FIN for session {sid.hex()[:8]}")
             for sid in dead_sids:
                 del self.sessions[sid]
+            if self._fin_outbox:
+                for sid in self._fin_outbox:
+                    frames_to_send.append(Frame(sid, 0, FLAG_FIN, b""))
+                    logger.debug(f"[client] sending orphan FIN for session {sid.hex()[:8]}")
+                self._fin_outbox = []
             if self._dns_outbox:
                 frames_to_send.extend(self._dns_outbox)
                 self._dns_outbox = []
@@ -305,8 +311,7 @@ class ClientTunnel:
                     continue
                 first_record = False
                 records += 1
-                async with self.lock:
-                    reply = await self._dispatch_single_frame(frame)
+                reply = await self._dispatch_single_frame(frame)
                 if reply:
                     dns_replies.append(reply)
         if mode == "batch":
@@ -318,11 +323,10 @@ class ClientTunnel:
                 except Exception as e:
                     logger.error(f"[client] poll: decrypt/unpack error: {e}")
                 else:
-                    async with self.lock:
-                        for f in incoming_frames:
-                            reply = await self._dispatch_single_frame(f)
-                            if reply:
-                                dns_replies.append(reply)
+                    for f in incoming_frames:
+                        reply = await self._dispatch_single_frame(f)
+                        if reply:
+                            dns_replies.append(reply)
         else:
             logger.debug(f"[client] poll: got {records} stream records")
         for addr, payload in dns_replies:
@@ -334,26 +338,33 @@ class ClientTunnel:
 
     async def _dispatch_single_frame(self, f):
         """Обрабатывает один входящий кадр. Возвращает (addr, payload) для
-        DNS-ответа либо None."""
+        DNS-ответа либо None. Запись в SOCKS5 выполняется ВНЕ lock, чтобы
+        медленный/мёртвый сокет приложения не блокировал поллинг."""
         if f.flags & FLAG_DNS:
-            entry = self._dns_pending.pop(f.session_id, None)
+            async with self.lock:
+                entry = self._dns_pending.pop(f.session_id, None)
             if entry:
                 addr, _ts = entry
                 return (addr, f.payload)
             logger.warning(f"[dns] no pending query for sid {f.session_id.hex()[:8]}")
             return None
+
+        async with self.lock:
+            sess = self.sessions.get(f.session_id)
         sid = f.session_id.hex()[:8]
-        sess = self.sessions.get(f.session_id)
         if not sess:
-            logger.warning(f"[client] session {sid} not found")
+            logger.debug(f"[client] session {sid} not found")
             return None
+
         if (f.flags & FLAG_DATA) and f.payload:
             try:
                 logger.debug(f"[client] session {sid} writing {len(f.payload)} bytes to SOCKS5")
                 sess.writer.write(f.payload)
                 await sess.writer.drain()
             except Exception as e:
-                logger.error(f"[client] session {sid} write error: {e}")
+                logger.error(f"[client] session {sid} write error, dropping session: {e}")
+                await self._drop_session(f.session_id)
+                return None
             self._last_activity = time.monotonic()
         if f.flags & FLAG_FIN:
             logger.info(f"[client] session {sid} FIN received")
@@ -362,6 +373,18 @@ class ClientTunnel:
             except Exception:
                 pass
         return None
+
+    async def _drop_session(self, sid: bytes):
+        """Выкидывает сессию из self.sessions и ставит её sid в очередь на
+        отправку FIN серверу, чтобы тот остановил поток данных по ней."""
+        async with self.lock:
+            sess = self.sessions.pop(sid, None)
+            self._fin_outbox.append(sid)
+        if sess is not None:
+            try:
+                sess.writer.close()
+            except Exception:
+                pass
 
     async def stop(self):
         self._stop = True

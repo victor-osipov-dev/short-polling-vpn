@@ -199,6 +199,7 @@ class ClientTunnel:
         self.dns_bind_port = int(dns_cfg.get("bind_port", 5353))
         self._dns_pending: dict = {}
         self._dns_outbox: list = []
+        self._fin_outbox: list = []
         self._dns_transport = None
         self._dns_protocol = None
         self._dns_task = None
@@ -336,6 +337,10 @@ class ClientTunnel:
                     dead_sids.append(sid)
             for sid in dead_sids:
                 del self.sessions[sid]
+            if self._fin_outbox:
+                for sid in self._fin_outbox:
+                    frames_to_send.append(Frame(sid, 0, FLAG_FIN, b""))
+                self._fin_outbox = []
             if self._dns_outbox:
                 frames_to_send.extend(self._dns_outbox)
                 self._dns_outbox = []
@@ -425,8 +430,7 @@ class ClientTunnel:
                     continue
                 first_record = False
                 records += 1
-                async with self.lock:
-                    reply = await self._dispatch_single_frame(frame)
+                reply = await self._dispatch_single_frame(frame)
                 if reply:
                     dns_replies.append(reply)
         if mode == "batch":
@@ -438,11 +442,10 @@ class ClientTunnel:
                 except Exception as e:
                     logger.error(f"decrypt/unpack error: {e}")
                 else:
-                    async with self.lock:
-                        for f in incoming_frames:
-                            reply = await self._dispatch_single_frame(f)
-                            if reply:
-                                dns_replies.append(reply)
+                    for f in incoming_frames:
+                        reply = await self._dispatch_single_frame(f)
+                        if reply:
+                            dns_replies.append(reply)
         else:
             logger.debug(f"got {records} stream records")
         for addr, payload in dns_replies:
@@ -454,22 +457,28 @@ class ClientTunnel:
 
     async def _dispatch_single_frame(self, f):
         if f.flags & FLAG_DNS:
-            entry = self._dns_pending.pop(f.session_id, None)
+            async with self.lock:
+                entry = self._dns_pending.pop(f.session_id, None)
             if entry:
                 addr, _ts = entry
                 return (addr, f.payload)
             logger.warning(f"[dns] no pending query for sid {f.session_id.hex()[:8]}")
             return None
+
+        async with self.lock:
+            sess = self.sessions.get(f.session_id)
         sid = f.session_id.hex()[:8]
-        sess = self.sessions.get(f.session_id)
         if not sess:
             return None
+
         if (f.flags & FLAG_DATA) and f.payload:
             try:
                 sess.writer.write(f.payload)
                 await sess.writer.drain()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"session {sid} write error, dropping session: {e}")
+                await self._drop_session(f.session_id)
+                return None
             self._last_activity = time.monotonic()
         if f.flags & FLAG_FIN:
             try:
@@ -477,6 +486,16 @@ class ClientTunnel:
             except Exception:
                 pass
         return None
+
+    async def _drop_session(self, sid: bytes):
+        async with self.lock:
+            sess = self.sessions.pop(sid, None)
+            self._fin_outbox.append(sid)
+        if sess is not None:
+            try:
+                sess.writer.close()
+            except Exception:
+                pass
 
     async def stop(self):
         self._stop = True
