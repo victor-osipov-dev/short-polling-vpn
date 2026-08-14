@@ -262,6 +262,21 @@ fun SimpleConfigTab(configManager: ConfigManager) {
                 onCheckedChange = { save(cfg.copy(verifyTls = it)) })
         }
 
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Log level:", color = MaterialTheme.colorScheme.onSurface)
+            FilterChip(
+                selected = cfg.loggingLevel == "DEBUG",
+                onClick = { save(cfg.copy(loggingLevel = "DEBUG")) },
+                label = { Text("DEBUG") }
+            )
+            FilterChip(
+                selected = cfg.loggingLevel == "INFO",
+                onClick = { save(cfg.copy(loggingLevel = "INFO")) },
+                label = { Text("INFO") }
+            )
+        }
+
         Text("Idle timeout:",
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
         Row(verticalAlignment = Alignment.CenterVertically,

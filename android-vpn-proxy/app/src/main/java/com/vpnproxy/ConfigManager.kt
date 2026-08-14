@@ -250,6 +250,10 @@ class ConfigManager(private val context: Context) {
 
     fun saveRaw(json: String) {
         configFile.writeText(json)
+        parseRaw(json)?.let { parsed ->
+            val active = getActiveProfile()
+            updateProfile(active.copy(config = parsed))
+        }
     }
 
     fun loadRaw(): String {

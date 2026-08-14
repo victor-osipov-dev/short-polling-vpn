@@ -122,12 +122,18 @@ class TunService : VpnService() {
         }
 
         val fd = pfd.fd
+        val logLevel = when (profile.config.loggingLevel.uppercase()) {
+            "DEBUG" -> "debug"
+            "WARN" -> "warn"
+            "ERROR" -> "error"
+            else -> "info"
+        }
         val argv = arrayOf(
             bin.absolutePath,
             "-d", "fd://$fd",
             "-p", "socks5://127.0.0.1:${profile.config.socksBindPort}",
             "--mtu", VPN_MTU.toString(),
-            "--loglevel", "info"
+            "--loglevel", logLevel
         )
         val logFile = File(filesDir, "tun2socks.log")
 
@@ -140,6 +146,7 @@ class TunService : VpnService() {
             }
         }
         log("VPN established on $VPN_ADDR, socks→127.0.0.1:${profile.config.socksBindPort}")
+        tailRunning = true
         startLogTailer(logFile)
         updateNotification("VPN running")
     }
