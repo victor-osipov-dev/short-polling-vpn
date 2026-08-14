@@ -171,6 +171,10 @@ class ClientTunnel:
         self.server_base = self.server_urls[0] if self.server_urls else client_cfg.get("server_url", "").rstrip("/")
         self.server_selector = str(client_cfg.get("server_selector", "round")).lower()
         self._rr_index = 0
+        self._url_failures = {}
+        self._url_cooldown_until = {}
+        self.url_fail_limit = max(1, int(client_cfg.get("url_fail_limit", 3)))
+        self.url_cooldown_seconds = max(1, int(client_cfg.get("url_cooldown_seconds", 60)))
         self.poll_path = client_cfg.get("poll_path", "/poll")
         self.server_url = self.server_base + self.poll_path
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
@@ -379,13 +383,41 @@ class ClientTunnel:
             delay_ms = max(10, self.poll_interval_ms + jitter)
             await asyncio.sleep(delay_ms / 1000)
 
+    def _available_urls(self):
+        """URL без активного карантина. Если выбыли все — сбрасываем карантин
+        и продолжаем слать на все (стратегия round/random), как просили."""
+        now = time.time()
+        avail = [u for u in self.server_urls if self._url_cooldown_until.get(u, 0) <= now]
+        if not avail and self.server_urls:
+            logger.warning("all server URLs quarantined; resetting cooldowns")
+            self._url_cooldown_until.clear()
+            self._url_failures.clear()
+            return self.server_urls
+        return avail
+
+    def _mark_success(self, url):
+        if url in self._url_failures or url in self._url_cooldown_until:
+            self._url_failures.pop(url, None)
+            self._url_cooldown_until.pop(url, None)
+            self.log(f"URL recovered: {url}")
+        self._url_failures[url] = 0
+
+    def _mark_failure(self, url):
+        fails = self._url_failures.get(url, 0) + 1
+        self._url_failures[url] = fails
+        if fails >= self.url_fail_limit and url not in self._url_cooldown_until:
+            self._url_cooldown_until[url] = time.time() + self.url_cooldown_seconds
+            self.log(f"URL quarantined for {self.url_cooldown_seconds}s: {url}")
+
     def _pick_server_base(self):
-        """Выбирает базу URL на каждый poll: round-robin или random."""
-        if not self.server_urls:
+        """Выбирает базу URL на каждый poll: round-robin или random (без
+        URL в карантине)."""
+        pool = self._available_urls()
+        if not pool:
             return ""
-        if len(self.server_urls) == 1 or self.server_selector == "random":
-            return random.choice(self.server_urls)
-        base = self.server_urls[self._rr_index % len(self.server_urls)]
+        if len(pool) == 1 or self.server_selector == "random":
+            return random.choice(pool)
+        base = pool[self._rr_index % len(pool)]
         self._rr_index += 1
         return base
 
@@ -512,7 +544,8 @@ class ClientTunnel:
             self._poll_count += 1
             if self._poll_count % 25 == 0:
                 logger.debug(f"Poll TS={ts} (device time: {time.ctime(now)})")
-            async with self.http.stream(self.poll_method, self._pick_server_base() + self._random_path(), **kwargs) as resp:
+            url_base = self._pick_server_base()
+            async with self.http.stream(self.poll_method, url_base + self._random_path(), **kwargs) as resp:
                 # Пытаемся синхронизировать время по заголовку Date от сервера
                 if "Date" in resp.headers:
                     try:
@@ -527,9 +560,14 @@ class ClientTunnel:
 
                 if resp.status_code == 403:
                     self.log("ERROR 403: Forbidden. Check PSK and Time Sync!")
+                if resp.status_code >= 400:
+                    self._mark_failure(url_base)
+                else:
+                    self._mark_success(url_base)
                 resp.raise_for_status()
                 await self._handle_stream_response(resp)
         except Exception as e:
+            self._mark_failure(url_base if 'url_base' in locals() else self.server_base)
             if "403" in str(e):
                 pass # Already logged
             else:

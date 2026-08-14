@@ -230,8 +230,10 @@ fun SimpleConfigTab(configManager: ConfigManager) {
                             save(cfg.copy(serverUrl = list.first(), serverUrls = list))
                         }
                     },
-                    enabled = cfg.effectiveServerUrls().size > 1
-                ) { Text("✕") }
+                    enabled = cfg.effectiveServerUrls().size > 1,
+                    contentPadding = PaddingValues(0.dp),
+                    modifier = Modifier.size(32.dp)
+                ) { Text("✕", fontSize = 15.sp) }
             }
         }
         Button(onClick = {
