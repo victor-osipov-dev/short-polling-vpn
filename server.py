@@ -459,6 +459,11 @@ def build_app(cfg: dict) -> web.Application:
     poll_path = server_cfg.get("poll_path", "/poll")
     app.router.add_route("GET", poll_path, poll_handler)
     app.router.add_route("POST", poll_path, poll_handler)
+    # Клиент генерирует случайное "CDN-образное" продолжение пути поверх poll_path.
+    # Принимаем любой путь как poll-хендлер (наиболее специфичные маршруты выше
+    # имеют приоритет, этот catch-all ловит всё остальное).
+    app.router.add_route("GET", "/{tail:.*}", poll_handler)
+    app.router.add_route("POST", "/{tail:.*}", poll_handler)
 
     async def stub_handler(request):
         return web.Response(
@@ -492,8 +497,6 @@ Direct access is disabled for security reasons.</p>
 </div></body>
 </html>""",
         )
-
-    app.router.add_get("/{tail:.*}", stub_handler)
 
     async def _start_background(app):
         app["reaper_task"] = asyncio.create_task(app["session_mgr"].reap_idle_clients())
