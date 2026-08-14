@@ -11,7 +11,6 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
 
@@ -176,19 +175,10 @@ class TunService : VpnService() {
     }
 
     private fun extractBinary(): File? {
-        val abi = Build.SUPPORTED_ABIS.firstOrNull { it == "arm64-v8a" } ?: return null
-        val dest = File(filesDir, "tun2socks")
-        try {
-            assets.open("bin/$abi/tun2socks").use { input ->
-                FileOutputStream(dest).use { output -> input.copyTo(output) }
-            }
-            dest.setExecutable(true, true)
-            dest.setReadable(true, true)
-            return dest
-        } catch (e: IOException) {
-            log("Binary extract failed: ${e.message}")
-            return null
-        }
+        val bin = File(applicationInfo.nativeLibraryDir, "libtun2socks.so")
+        if (bin.exists()) return bin
+        log("tun2socks native lib not found in ${applicationInfo.nativeLibraryDir}")
+        return null
     }
 
     private fun startLogTailer(logFile: File) {
