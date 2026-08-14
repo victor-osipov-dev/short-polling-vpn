@@ -67,6 +67,118 @@ def build_stream_response(enc_key, frames) -> bytes:
     return bytes(out)
 
 
+# ── Фейковый контент для повторных / невалидных запросов ──────────────
+# Если запрос не прошёл проверку протокола (повтор из истории CDN, отсутствие
+# параметров, устаревший timestamp), мы НЕ отдаём ошибки протокола (missing
+# params / bad mac / stale) — они палят туннель. Вместо этого отвечаем
+# правдоподобным контентом под тип URL (js/css/json/картинка и т.п.), а для
+# всего остального — HTML-заглушкой 404. Ошибки протокола доступны только при
+# заголовке X-Debug: 1 (диагностика своего клиента).
+
+TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\x7f"
+    b"\x1f\x00\x07\x06\x01\x80/\x9e\x17\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+_FAKE_TEXT = {
+    "application/javascript; charset=utf-8": (
+        "/* __g.rev 2026.08.14 */\n"
+        "var __g={rev:1,cache:true,ready:false};\n"
+        "function __ready(f){if(document.readyState!=='loading')f();"
+        "else document.addEventListener('DOMContentLoaded',f)}\n"
+        "__ready(function(){__g.ready=true});\n"
+    ),
+    "text/css; charset=utf-8": (
+        ":root{--a:#3b82f6}\n*{box-sizing:border-box}\n"
+        "html,body{margin:0;height:100%}\n"
+        "body{font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif;"
+        "background:#f8fafc;color:#0f172a}\n"
+    ),
+    "application/json; charset=utf-8": '{"ok":true,"version":1,"status":"OK","data":[]}\n',
+    "application/xml; charset=utf-8": '<?xml version="1.0" encoding="UTF-8"?><root><status>OK</status></root>\n',
+    "text/plain; charset=utf-8": "OK\n",
+    "application/vnd.apple.mpegurl": (
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n"
+        "#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:6.0,\n/media/segment001.ts\n"
+        "#EXTINF:6.0,\n/media/segment002.ts\n#EXT-X-ENDLIST\n"
+    ),
+    "image/svg+xml": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">'
+        '<rect width="16" height="16" fill="#e2e8f0"/></svg>\n'
+    ),
+}
+
+# Расширение (нижний регистр, с точкой) -> content-type
+_FAKE_EXT = {
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".xml": "application/xml; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".ts": "video/mp2t",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".wav": "audio/wav",
+    ".zip": "application/zip",
+    ".gz": "application/gzip",
+    ".tar": "application/x-tar",
+    ".apk": "application/vnd.android.package-archive",
+    ".pdf": "application/pdf",
+    ".exe": "application/octet-stream",
+    ".bin": "application/octet-stream",
+}
+
+_FAKE_JSON_PREFIXES = (
+    "/api/", "/config", "/health", "/status", "/manifest",
+    "/locales/", "/i18n/", "/edge/", "/cdn/config", "/content/",
+)
+
+
+def fake_response(request) -> web.Response:
+    """Возвращает правдоподобный ответ под тип URL; иначе 404-заглушку."""
+    path = request.path.lower()
+    for prefix in _FAKE_JSON_PREFIXES:
+        if path.startswith(prefix):
+            ct = "application/json"
+            return web.Response(body=_FAKE_TEXT["application/json; charset=utf-8"].encode(),
+                                headers={"Content-Type": ct, "Cache-Control": "public, max-age=3600"})
+    for ext, ct in _FAKE_EXT.items():
+        if path.endswith(ext):
+            body = _FAKE_TEXT.get(ct, TINY_PNG)
+            if isinstance(body, str):
+                body = body.encode()
+            return web.Response(body=body,
+                                headers={"Content-Type": ct, "Cache-Control": "public, max-age=3600"})
+    return web.Response(
+        status=404,
+        headers={"Content-Type": "text/html; charset=utf-8"},
+        body=('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+              '<title>404 Not Found</title></head><body><center>'
+              '<h1>404 Not Found</h1><p>The requested URL was not found on '
+              'this server.</p></center></body></html>'),
+    )
+
+
 def enable_tcp_keepalive(transport) -> None:
     """Включает TCP keepalive на сокете, чтобы idle-соединения не резались
     таймаутами, а реально мёртвые — закрывались ОС."""
@@ -349,6 +461,7 @@ class SessionManager:
 
 async def poll_handler(request: web.Request):
     app = request.app
+    debug = request.headers.get("X-Debug") == "1"
     qs = request.query
     ts = qs.get("t")
     cid_b64 = request.headers.get("X-Cid")
@@ -359,8 +472,10 @@ async def poll_handler(request: web.Request):
                 bool(mac), dict(request.headers))
 
     if not all([cid_b64, ts, mac]):
-        logger.warning("400 missing params: cid=%s ts=%s mac=%s", cid_b64 is not None, ts, mac is not None)
-        return web.Response(status=400, text="missing params")
+        if debug:
+            logger.warning("400 missing params: cid=%s ts=%s mac=%s", cid_b64 is not None, ts, mac is not None)
+            return web.Response(status=400, text="missing params")
+        return fake_response(request)
 
     read_body = await request.read()
     d_b64 = request.headers.get("X-Data")
@@ -369,44 +484,56 @@ async def poll_handler(request: web.Request):
     if not d_b64:
         d_b64 = qs.get("d")
     if not d_b64:
-        logger.warning("400 missing data: cid=%s ts=%s X-Data=%s body_len=%s",
-                       cid_b64, ts, bool(request.headers.get("X-Data")), len(read_body))
-        return web.Response(status=400, text="missing data")
+        if debug:
+            logger.warning("400 missing data: cid=%s ts=%s X-Data=%s body_len=%s",
+                           cid_b64, ts, bool(request.headers.get("X-Data")), len(read_body))
+            return web.Response(status=400, text="missing data")
+        return fake_response(request)
 
     try:
         client_id = b64u_decode(cid_b64)
         blob = b64u_decode(d_b64)
     except Exception as e:
-        logger.warning("400 bad encoding: %s", e)
-        return web.Response(status=400, text="bad encoding")
+        if debug:
+            logger.warning("400 bad encoding: %s", e)
+            return web.Response(status=400, text="bad encoding")
+        return fake_response(request)
 
     hmac_key = app["hmac_key"]
     if not verify(hmac_key, client_id + ts.encode() + blob, mac):
-        from crypto_utils import sign as _sign
-        expected = _sign(hmac_key, client_id + ts.encode() + blob)
-        logger.warning("403 bad mac: cid=%s ts=%s blob_len=%s d64_len=%s "
-                       "got_mac=%s expected_mac=%s",
-                       cid_b64, ts, len(blob), len(d_b64), mac, expected)
-        return web.Response(status=403, text="bad mac")
+        if debug:
+            from crypto_utils import sign as _sign
+            expected = _sign(hmac_key, client_id + ts.encode() + blob)
+            logger.warning("403 bad mac: cid=%s ts=%s blob_len=%s d64_len=%s "
+                           "got_mac=%s expected_mac=%s",
+                           cid_b64, ts, len(blob), len(d_b64), mac, expected)
+            return web.Response(status=403, text="bad mac")
+        return fake_response(request)
 
     window = app["hmac_window_seconds"]
     try:
         ts_int = int(ts)
     except ValueError:
-        logger.warning("400 bad timestamp: ts=%s", ts)
-        return web.Response(status=400, text="bad timestamp")
+        if debug:
+            logger.warning("400 bad timestamp: ts=%s", ts)
+            return web.Response(status=400, text="bad timestamp")
+        return fake_response(request)
     diff = abs(int(time.time()) - ts_int)
     if diff > window:
-        logger.warning("403 stale request: ts=%s now=%s diff=%ss window=%ss", ts, int(time.time()), diff, window)
-        return web.Response(status=403, text="stale request")
+        if debug:
+            logger.warning("403 stale request: ts=%s now=%s diff=%ss window=%ss", ts, int(time.time()), diff, window)
+            return web.Response(status=403, text="stale request")
+        return fake_response(request)
 
     enc_key = app["enc_key"]
     try:
         plaintext = decrypt(enc_key, blob)
         frames = unpack_frames(plaintext)
     except Exception as e:
-        logger.warning("400 bad payload: %s", e)
-        return web.Response(status=400, text="bad payload")
+        if debug:
+            logger.warning("400 bad payload: %s", e)
+            return web.Response(status=400, text="bad payload")
+        return fake_response(request)
 
     mgr: SessionManager = app["session_mgr"]
     await mgr.handle_incoming(client_id, frames)
@@ -464,39 +591,6 @@ def build_app(cfg: dict) -> web.Application:
     # имеют приоритет, этот catch-all ловит всё остальное).
     app.router.add_route("GET", "/{tail:.*}", poll_handler)
     app.router.add_route("POST", "/{tail:.*}", poll_handler)
-
-    async def stub_handler(request):
-        return web.Response(
-            content_type="text/html",
-            charset="utf-8",
-            body="""<!DOCTYPE html>
-<html lang="ru">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Short Polling VPN</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-  background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);min-height:100vh;
-  display:flex;align-items:center;justify-content:center;color:#fff}
-.card{background:rgba(255,255,255,.08);backdrop-filter:blur(12px);
-  border-radius:24px;padding:48px 40px;text-align:center;max-width:440px;
-  box-shadow:0 25px 50px -12px rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.1)}
-h1{font-size:28px;font-weight:600;margin-bottom:8px}
-p{color:rgba(255,255,255,.7);font-size:15px;line-height:1.6;margin-bottom:24px}
-.status{display:inline-flex;align-items:center;gap:8px;
-  background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3);
-  border-radius:999px;padding:6px 18px;font-size:14px;font-weight:500}
-.status::before{content:'';width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-</style></head>
-<body><div class="card">
-<h1>Short Polling VPN</h1>
-<p>This server is running a secure tunnel proxy.<br>
-Direct access is disabled for security reasons.</p>
-<div class="status">Service active</div>
-</div></body>
-</html>""",
-        )
 
     async def _start_background(app):
         app["reaper_task"] = asyncio.create_task(app["session_mgr"].reap_idle_clients())
