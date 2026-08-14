@@ -1,3 +1,5 @@
 # ninja log v5
 2	3426	8084073485577013	CMakeFiles/vpnrunner.dir/src/main/cpp/vpn_runner.c.o	1eb97c2bfc62d41b
 3432	3994	8084073491753992	../../../../build/intermediates/cxx/Debug/57b695g1/obj/arm64-v8a/libvpnrunner.so	be01106baec3bc17
+29	738	8084118836841377	CMakeFiles/vpnrunner.dir/src/main/cpp/vpn_runner.c.o	1eb97c2bfc62d41b
+739	1180	8084118841918832	../../../../build/intermediates/cxx/Debug/57b695g1/obj/arm64-v8a/libvpnrunner.so	be01106baec3bc17

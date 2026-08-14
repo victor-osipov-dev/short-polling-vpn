@@ -141,6 +141,12 @@ class TunService : VpnService() {
         log("launching tun2socks: ${bin.absolutePath} fd=$fd socks=127.0.0.1:${profile.config.socksBindPort}")
         TunRunner.launch(fd, argv, logFile.absolutePath) { code ->
             log("tun2socks exited: $code")
+            val tail = try {
+                if (logFile.exists()) logFile.readLines().takeLast(40).joinToString("\n") else ""
+            } catch (_: Exception) {
+                ""
+            }
+            if (tail.isNotBlank()) log("tun2socks.log tail:\n$tail")
             handler?.post {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
