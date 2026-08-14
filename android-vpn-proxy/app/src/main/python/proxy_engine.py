@@ -622,6 +622,13 @@ async def handle_socks_client(tunnel, reader, writer):
     if cmd == 0x03:
         await handle_udp_associate(tunnel, reader, writer, host, port)
         return
+    try:
+        writer.write(bytes([SOCKS_VERSION, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+        await writer.drain()
+    except Exception as e:
+        logger.debug(f"socks CONNECT reply failed from {peer}: {e}")
+        writer.close()
+        return
     sid = await tunnel.register_session(writer, host, port)
     _enable_tcp_keepalive(writer.transport)
 
