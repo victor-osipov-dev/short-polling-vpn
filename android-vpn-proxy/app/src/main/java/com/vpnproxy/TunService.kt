@@ -112,6 +112,7 @@ class TunService : VpnService() {
         vpnInterface = pfd
 
         val bin = extractBinary()
+        log("ABIs: " + Build.SUPPORTED_ABIS.joinToString())
         if (bin == null) {
             log("No tun2socks binary for ABI " + Build.SUPPORTED_ABIS.firstOrNull())
             pfd.close()

@@ -61,6 +61,7 @@ Java_com_vpnproxy_TunRunner_start(JNIEnv *env, jclass clazz, jint tunFd,
         int flags = fcntl(tunFd, F_GETFD);
         if (flags >= 0) fcntl(tunFd, F_SETFD, flags & ~FD_CLOEXEC);
         if (args[0]) execv(args[0], args);
+        dprintf(STDERR_FILENO, "execv failed: errno=%d (%s)\n", errno, strerror(errno));
         _exit(127);
     }
 
