@@ -196,14 +196,48 @@ fun SimpleConfigTab(configManager: ConfigManager) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        ConfigTextField(
-            "Server URLs (one per line)",
-            (if (cfg.serverUrls.isNotEmpty()) cfg.serverUrls else listOf(cfg.serverUrl)).joinToString("\n"),
-            singleLine = false
-        ) {
-            val lines = it.lines().map { l -> l.trim() }.filter { l -> l.isNotEmpty() }
-            save(cfg.copy(serverUrl = lines.firstOrNull() ?: cfg.serverUrl, serverUrls = lines))
+        Text("Server URLs:",
+             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+        cfg.effectiveServerUrls().forEachIndexed { i, url ->
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { new ->
+                        val list = cfg.effectiveServerUrls().toMutableList()
+                        list[i] = new
+                        val clean = list.map { it.trim() }.filter { it.isNotEmpty() }
+                        save(cfg.copy(
+                            serverUrl = clean.firstOrNull() ?: cfg.serverUrl,
+                            serverUrls = clean
+                        ))
+                    },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("URL ${i + 1}") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                        cursorColor = MaterialTheme.colorScheme.primary,
+                    )
+                )
+                TextButton(
+                    onClick = {
+                        val list = cfg.effectiveServerUrls().toMutableList()
+                        if (list.size > 1) {
+                            list.removeAt(i)
+                            save(cfg.copy(serverUrl = list.first(), serverUrls = list))
+                        }
+                    },
+                    enabled = cfg.effectiveServerUrls().size > 1
+                ) { Text("✕") }
+            }
         }
+        Button(onClick = {
+            val list = cfg.effectiveServerUrls() + ""
+            save(cfg.copy(serverUrl = list.first(), serverUrls = list))
+        }) { Text("+ Add URL") }
 
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
