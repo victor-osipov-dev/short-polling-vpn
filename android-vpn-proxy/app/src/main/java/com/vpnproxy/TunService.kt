@@ -64,7 +64,7 @@ class TunService : VpnService() {
         val notification = buildNotification("Starting VPN...")
         startForeground(NOTIFICATION_ID, notification)
 
-        val builder = Builder(this).apply {
+        val builder = Builder().apply {
             setSession("tun2socks")
             setMtu(VPN_MTU)
             addAddress(VPN_ADDR, 24)
