@@ -586,7 +586,9 @@ fun getInstalledApps(context: Context): List<AppRule> {
     return try {
         pm.getInstalledApplications(0).mapNotNull { ai ->
             val label = try { pm.getApplicationLabel(ai).toString() } catch (_: Exception) { ai.packageName }
-            AppRule(ai.packageName, label)
+            val isSystem = (ai.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0) ||
+                (ai.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0)
+            AppRule(ai.packageName, label, isSystem)
         }.sortedBy { it.appName.lowercase() }
     } catch (_: Exception) {
         emptyList()
@@ -596,8 +598,12 @@ fun getInstalledApps(context: Context): List<AppRule> {
 @Composable
 fun AppPickerDialog(apps: List<AppRule>, onDismiss: () -> Unit, onPick: (AppRule) -> Unit) {
     var query by remember { mutableStateOf("") }
-    val filtered = remember(query, apps) {
-        if (query.isBlank()) apps else apps.filter {
+    var showSystem by remember { mutableStateOf(false) }
+    val visible = remember {
+        if (showSystem) apps else apps.filter { !it.system }
+    }
+    val filtered = remember(query, visible) {
+        if (query.isBlank()) visible else visible.filter {
             it.appName.contains(query, ignoreCase = true) || it.packageName.contains(query, ignoreCase = true)
         }
     }
@@ -606,6 +612,10 @@ fun AppPickerDialog(apps: List<AppRule>, onDismiss: () -> Unit, onPick: (AppRule
         title = { Text("Select app") },
         text = {
             Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = showSystem, onCheckedChange = { showSystem = it })
+                    Text("Show system apps", color = MaterialTheme.colorScheme.onSurface)
+                }
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },

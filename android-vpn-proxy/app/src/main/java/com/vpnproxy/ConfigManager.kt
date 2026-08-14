@@ -100,7 +100,7 @@ data class ProxyConfig(
     }
 }
 
-data class AppRule(val packageName: String = "", val appName: String = "") {
+data class AppRule(val packageName: String = "", val appName: String = "", val system: Boolean = false) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("package", packageName)
         put("name", appName)
