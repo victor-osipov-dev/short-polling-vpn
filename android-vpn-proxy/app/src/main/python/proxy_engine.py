@@ -203,6 +203,7 @@ class ClientTunnel:
         self._dns_transport = None
         self._dns_protocol = None
         self._dns_task = None
+        self.socks_bind_host = client_cfg.get("socks5", {}).get("bind_host", "127.0.0.1")
 
     def set_log_callback(self, cb):
         self._on_log = cb
@@ -212,6 +213,60 @@ class ClientTunnel:
             self._on_log(msg)
         else:
             logger.info(msg)
+
+    async def _handle_udp_associate_datagram(self, transport, data, addr):
+        if len(data) < 4:
+            return
+        _rsv = data[0:2]
+        frag = data[2]
+        atyp = data[3]
+        if frag != 0:
+            logger.warning("[udp] fragmented datagram not supported")
+            return
+        offset = 4
+        if atyp == 0x01:
+            offset += 4
+        elif atyp == 0x03:
+            hl = data[offset]
+            offset += 1 + hl
+        elif atyp == 0x04:
+            offset += 16
+        else:
+            return
+        if offset + 2 > len(data):
+            return
+        offset += 2
+        payload = data[offset:]
+        if len(payload) < 12:
+            return
+        prefix = data[:offset]
+        sid = new_session_id()
+        frame = Frame(sid, 0, FLAG_DNS, payload)
+        async with self.lock:
+            self._dns_pending[sid] = (transport, addr, prefix, time.monotonic())
+        logger.debug(f"[udp] queued {len(payload)}B dns from {addr}")
+        self._last_activity = time.monotonic()
+        await self._enqueue_dns_frame(frame)
+
+    async def create_udp_associate(self, bind_host):
+        loop = asyncio.get_event_loop()
+
+        class UdpAssocProtocol(asyncio.DatagramProtocol):
+            def __init__(self, owner):
+                self.owner = owner
+
+            def datagram_received(self, data, addr):
+                asyncio.create_task(
+                    self.owner._handle_udp_associate_datagram(self.transport, data, addr))
+
+            def error_received(self, exc):
+                logger.warning(f"[udp] associate error: {exc}")
+
+        proto = UdpAssocProtocol(self)
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: proto, local_addr=(bind_host, 0))
+        proto.transport = transport
+        return transport
 
     async def register_session(self, writer: asyncio.StreamWriter, host: str, port: int) -> bytes:
         sid = new_session_id()
@@ -275,7 +330,7 @@ class ClientTunnel:
         sid = new_session_id()
         frame = Frame(sid, 0, FLAG_DNS, data)
         async with self.lock:
-            self._dns_pending[sid] = (addr, time.monotonic())
+            self._dns_pending[sid] = (self._dns_transport, addr, None, time.monotonic())
         logger.debug(f"[dns] queued {len(data)}B query from {addr}")
         self._last_activity = time.monotonic()
         await self._enqueue_dns_frame(frame)
@@ -286,7 +341,7 @@ class ClientTunnel:
 
     def _prune_dns_pending(self):
         now = time.monotonic()
-        expired = [sid for sid, (_, ts) in self._dns_pending.items()
+        expired = [sid for sid, (_t, _addr, _prefix, ts) in self._dns_pending.items()
                    if now - ts > 30]
         for sid in expired:
             del self._dns_pending[sid]
@@ -448,9 +503,12 @@ class ClientTunnel:
                             dns_replies.append(reply)
         else:
             logger.debug(f"got {records} stream records")
-        for addr, payload in dns_replies:
+        for transport, addr, prefix, payload in dns_replies:
             try:
-                self._dns_transport.sendto(payload, addr)
+                if prefix is not None and transport is not None:
+                    transport.sendto(prefix + payload, addr)
+                else:
+                    self._dns_transport.sendto(payload, addr)
                 logger.debug(f"[dns] reply {len(payload)}B to {addr}")
             except Exception as e:
                 logger.error(f"[dns] failed to send reply to {addr}: {e}")
@@ -460,8 +518,8 @@ class ClientTunnel:
             async with self.lock:
                 entry = self._dns_pending.pop(f.session_id, None)
             if entry:
-                addr, _ts = entry
-                return (addr, f.payload)
+                transport, addr, prefix, _ts = entry
+                return (transport, addr, prefix, f.payload)
             logger.warning(f"[dns] no pending query for sid {f.session_id.hex()[:8]}")
             return None
 
@@ -535,10 +593,10 @@ async def socks5_handshake(reader, writer):
     await writer.drain()
     req = await reader.readexactly(4)
     ver, cmd, _rsv, atyp = req
-    if cmd != 0x01:
+    if cmd not in (0x01, 0x03):
         writer.write(bytes([SOCKS_VERSION, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
         await writer.drain()
-        raise ConnectionError("only CONNECT supported")
+        raise ConnectionError("unsupported command")
     if atyp == 0x01:
         host = socket.inet_ntoa(await reader.readexactly(4))
     elif atyp == 0x03:
@@ -549,19 +607,20 @@ async def socks5_handshake(reader, writer):
     else:
         raise ConnectionError("unsupported address type")
     port = struct.unpack("!H", await reader.readexactly(2))[0]
-    writer.write(bytes([SOCKS_VERSION, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
-    await writer.drain()
-    return host, port
+    return cmd, host, port
 
 
 async def handle_socks_client(tunnel, reader, writer):
     peer = writer.get_extra_info("peername")
     tunnel.log(f"socks: new connection from {peer}")
     try:
-        host, port = await socks5_handshake(reader, writer)
+        cmd, host, port = await socks5_handshake(reader, writer)
     except Exception as e:
         logger.debug(f"socks handshake failed from {peer}: {e}")
         writer.close()
+        return
+    if cmd == 0x03:
+        await handle_udp_associate(tunnel, reader, writer, host, port)
         return
     sid = await tunnel.register_session(writer, host, port)
     _enable_tcp_keepalive(writer.transport)
@@ -581,6 +640,41 @@ async def handle_socks_client(tunnel, reader, writer):
             await tunnel.mark_closed(sid)
 
     asyncio.create_task(read_loop())
+
+
+async def handle_udp_associate(tunnel, reader, writer, host, port):
+    peer = writer.get_extra_info("peername")
+    try:
+        udp_transport = await tunnel.create_udp_associate(tunnel.socks_bind_host)
+        bind_host, bind_port = udp_transport.get_extra_info("sockname")[:2]
+    except Exception as e:
+        logger.error(f"[udp] failed to create udp associate for {peer}: {e}")
+        writer.close()
+        return
+    if ":" in str(bind_host):
+        resp = bytes([SOCKS_VERSION, 0x00, 0x00, 0x04]) + socket.inet_pton(socket.AF_INET6, bind_host)
+    else:
+        resp = bytes([SOCKS_VERSION, 0x00, 0x00, 0x01]) + socket.inet_aton(bind_host)
+    resp += struct.pack("!H", bind_port)
+    try:
+        writer.write(resp)
+        await writer.drain()
+    except Exception as e:
+        logger.error(f"[udp] failed to reply to {peer}: {e}")
+        udp_transport.close()
+        writer.close()
+        return
+    tunnel.log(f"socks: udp associate for {peer} -> {bind_host}:{bind_port}")
+    try:
+        while True:
+            data = await reader.read(4096)
+            if not data:
+                break
+    except Exception as e:
+        logger.debug(f"socks udp associate read error from {peer}: {e}")
+    finally:
+        udp_transport.close()
+        writer.close()
 
 
 async def run_socks5_server(tunnel, bind_host, bind_port):
