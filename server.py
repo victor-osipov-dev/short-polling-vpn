@@ -111,8 +111,26 @@ class SessionManager:
         self._pending_opens: dict[bytes, set[bytes]] = {}
         self._pending_data: dict[bytes, dict[bytes, list[bytes]]] = {}
         self._dns_replies: dict[bytes, dict[bytes, bytes]] = {}  # client_id -> {sid: dns_response}
-        self._dns_resolver_host = dns_resolver
-        self._dns_resolver_port = dns_port
+        # Резолверы перебираются по порядку при таймауте/ошибке. 8.8.8.8 молча
+        # дропает запросы с EDNS0-паддингом (шлёт happ DoU), 1.1.1.1 отвечает.
+        self._dns_resolvers = [(host.strip(), int(port)) for host, port in
+                               self._parse_resolvers(dns_resolver, dns_port)]
+
+    @staticmethod
+    def _parse_resolvers(dns_resolver: str, dns_port: int):
+        """Принимает '8.8.8.8' или '8.8.8.8:53,1.1.1.1:53'."""
+        items = [part.strip() for part in dns_resolver.split(",") if part.strip()]
+        for part in items:
+            if ":" in part:
+                h, p = part.rsplit(":", 1)
+                try:
+                    yield h.strip(), int(p)
+                except ValueError:
+                    yield part, dns_port
+            else:
+                yield part, dns_port
+        if not items:
+            yield dns_resolver, dns_port
 
     async def handle_incoming(self, client_id: bytes, frames):
         cid = client_id.hex()[:8]
@@ -248,9 +266,10 @@ class SessionManager:
             logger.info(f"[server] pump finished for session {sid}")
 
     async def _resolve_dns(self, client_id: bytes, session_id: bytes, query: bytes):
-        """Резолвит raw DNS-запрос через dns_resolver и кладёт ответ в outbox клиента."""
-        try:
-            loop = asyncio.get_event_loop()
+        """Резолвит raw DNS-запрос через резолверы (с fallback) и кладёт ответ в outbox клиента."""
+        loop = asyncio.get_event_loop()
+        last_error = None
+        for host, port in self._dns_resolvers:
             fut = loop.create_future()
 
             class _Proto(asyncio.DatagramProtocol):
@@ -262,25 +281,30 @@ class SessionManager:
                     if not fut.done():
                         fut.set_exception(exc)
 
-            transport, _ = await loop.create_datagram_endpoint(
-                lambda: _Proto(),
-                remote_addr=(self._dns_resolver_host, self._dns_resolver_port),
-            )
+            transport = None
             try:
+                transport, _ = await loop.create_datagram_endpoint(
+                    lambda: _Proto(),
+                    remote_addr=(host, port),
+                )
                 transport.sendto(query)
-                reply = await asyncio.wait_for(fut, timeout=10)
+                reply = await asyncio.wait_for(fut, timeout=4)
+            except Exception as e:
+                last_error = e
+                if transport is not None:
+                    transport.close()
+                continue
             finally:
-                transport.close()
-        except Exception as e:
-            logger.error(f"[server] DNS resolve failed for sid {session_id.hex()[:8]}: {e}")
-            return
+                if transport is not None:
+                    transport.close()
 
-        if len(reply) < 12 or not reply:
-            logger.warning(f"[server] DNS bad reply for sid {session_id.hex()[:8]}: {len(reply)}B")
-            return
-        async with self.lock:
-            self._dns_replies.setdefault(client_id, {})[session_id] = reply
-        logger.debug(f"[server] DNS reply {len(reply)}B stored for sid {session_id.hex()[:8]}")
+            if reply and len(reply) >= 12:
+                async with self.lock:
+                    self._dns_replies.setdefault(client_id, {})[session_id] = reply
+                logger.debug(f"[server] DNS reply {len(reply)}B stored for sid {session_id.hex()[:8]}")
+                return
+            last_error = ValueError(f"bad reply len {len(reply) if reply else 0}")
+        logger.error(f"[server] DNS resolve failed for sid {session_id.hex()[:8]}: {last_error}")
 
     async def collect_outgoing(self, client_id: bytes):
         frames = []
@@ -429,7 +453,7 @@ def build_app(cfg: dict) -> web.Application:
     app["session_mgr"] = SessionManager(
         max_chunk_bytes=int(server_cfg.get("max_chunk_bytes", 4096)),
         idle_timeout=int(server_cfg.get("idle_timeout_seconds", 120)),
-        dns_resolver=str(server_cfg.get("dns_resolver", "8.8.8.8")),
+        dns_resolver=str(server_cfg.get("dns_resolver", "8.8.8.8:53,1.1.1.1:53")),
         dns_port=int(server_cfg.get("dns_resolver_port", 53)),
     )
     poll_path = server_cfg.get("poll_path", "/poll")
