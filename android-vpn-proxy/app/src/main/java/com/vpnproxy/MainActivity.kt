@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             intent?.getStringExtra("msg")?.let { msg ->
                 logs.add(LogEntry(++logSeq, msg))
-                if (logs.size > 500) logs.removeAt(0)
+                if (logs.size > 3000) logs.removeAt(0)
             }
         }
     }

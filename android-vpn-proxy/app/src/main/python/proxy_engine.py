@@ -203,6 +203,7 @@ class ClientTunnel:
         self._dns_transport = None
         self._dns_protocol = None
         self._dns_task = None
+        self._poll_count = 0
         self.socks_bind_host = client_cfg.get("socks5", {}).get("bind_host", "127.0.0.1")
 
     def set_log_callback(self, cb):
@@ -423,7 +424,9 @@ class ClientTunnel:
             kwargs["content"] = b64u_encode(blob)
 
         try:
-            logger.debug(f"Poll TS={ts} (device time: {time.ctime(now)})")
+            self._poll_count += 1
+            if self._poll_count % 25 == 0:
+                logger.debug(f"Poll TS={ts} (device time: {time.ctime(now)})")
             async with self.http.stream(self.poll_method, self.server_url, **kwargs) as resp:
                 # Пытаемся синхронизировать время по заголовку Date от сервера
                 if "Date" in resp.headers:
@@ -502,7 +505,8 @@ class ClientTunnel:
                         if reply:
                             dns_replies.append(reply)
         else:
-            logger.debug(f"got {records} stream records")
+            if records > 0:
+                logger.debug(f"got {records} stream records")
         for transport, addr, prefix, payload in dns_replies:
             try:
                 if prefix is not None and transport is not None:
