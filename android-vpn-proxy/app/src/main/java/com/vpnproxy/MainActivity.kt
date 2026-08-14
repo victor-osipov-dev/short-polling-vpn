@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import java.util.UUID
 
 data class LogEntry(val id: Long, val text: String)
 
@@ -131,13 +132,15 @@ fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>) 
         Column(modifier = Modifier.padding(padding)) {
             TabRow(selectedTabIndex = tab) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Simple") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Config") })
-                Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Log") })
+                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Profiles") })
+                Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Config") })
+                Tab(selected = tab == 3, onClick = { tab = 3 }, text = { Text("Log") })
             }
             when (tab) {
                 0 -> SimpleConfigTab(configManager)
-                1 -> RawConfigTab(configManager)
-                2 -> LogTab(logs, autoScroll, { autoScroll = it })
+                1 -> ProfilesTab(configManager)
+                2 -> RawConfigTab(configManager)
+                3 -> LogTab(logs, autoScroll, { autoScroll = it })
             }
         }
     }
@@ -281,6 +284,306 @@ fun ConfigTextField(
             unfocusedLabelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
             cursorColor = MaterialTheme.colorScheme.primary,
         )
+    )
+}
+
+// ── Profiles tab ──────────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProfilesTab(configManager: ConfigManager) {
+    var profiles by remember { mutableStateOf(configManager.loadProfiles()) }
+    var activeId by remember { mutableStateOf(configManager.getActiveProfile().id) }
+    var editing by remember { mutableStateOf(configManager.getActiveProfile()) }
+    var showNameDialog by remember { mutableStateOf(false) }
+    var dialogKind by remember { mutableStateOf("new") } // new | rename | duplicate
+    val appContext = LocalContext.current
+    val installedApps = remember { getInstalledApps(appContext) }
+    var showAppPicker by remember { mutableStateOf(false) }
+    var pickerList by remember { mutableStateOf("allow") } // allow | block
+    var pendingDelete by remember { mutableStateOf<VpnProfile?>(null) }
+
+    fun refresh() {
+        profiles = configManager.loadProfiles()
+        activeId = configManager.getActiveProfile().id
+        editing = configManager.getActiveProfile()
+    }
+
+    fun persist(p: VpnProfile) {
+        configManager.updateProfile(p)
+        editing = p
+        profiles = configManager.loadProfiles()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Profiles", style = MaterialTheme.typography.titleMedium,
+             color = MaterialTheme.colorScheme.onSurface)
+        Text("Each profile stores mode, connection settings and routing. Switch, then Stop/Start to apply.",
+             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+
+        // Profile selector cards: tap makes active + editable
+        profiles.forEach { p ->
+            val isActive = p.id == activeId
+            Card(
+                onClick = {
+                    configManager.selectProfile(p.id)
+                    activeId = p.id
+                    editing = p
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                    else MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(p.name, color = MaterialTheme.colorScheme.onSurface,
+                             fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                        Text(if (p.mode == "vpn") "VPN mode" else "Proxy (SOCKS5) mode",
+                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+                    }
+                    if (isActive) {
+                        Text("ACTIVE", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                    }
+                    TextButton(onClick = {
+                        pendingDelete = p
+                    }) {
+                        Text("✕", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 14.sp)
+                    }
+                }
+            }
+        }
+
+        pendingDelete?.let { doomed ->
+            AlertDialog(
+                onDismissRequest = { pendingDelete = null },
+                title = { Text("Delete profile") },
+                text = { Text("Delete \"${doomed.name}\"? This cannot be undone.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        configManager.deleteProfile(doomed.id)
+                        pendingDelete = null
+                        refresh()
+                    }) { Text("Delete") }
+                },
+                dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } }
+            )
+        }
+
+        Divider()
+
+        // Editing section
+        Text("Edit: \"${editing.name}\"", style = MaterialTheme.typography.titleSmall,
+             color = MaterialTheme.colorScheme.onSurface)
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { dialogKind = "new"; showNameDialog = true },
+                modifier = Modifier.weight(1f)
+            ) { Text("New") }
+            Button(
+                onClick = { dialogKind = "rename"; showNameDialog = true },
+                modifier = Modifier.weight(1f)
+            ) { Text("Rename") }
+            Button(
+                onClick = { dialogKind = "duplicate"; showNameDialog = true },
+                modifier = Modifier.weight(1f)
+            ) { Text("Duplicate") }
+        }
+
+        // Mode selection
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Mode:", color = MaterialTheme.colorScheme.onSurface)
+            FilterChip(
+                selected = editing.mode == "proxy",
+                onClick = { persist(editing.copy(mode = "proxy")) },
+                label = { Text("Proxy") }
+            )
+            FilterChip(
+                selected = editing.mode == "vpn",
+                onClick = { persist(editing.copy(mode = "vpn")) },
+                label = { Text("VPN") }
+            )
+        }
+        if (editing.mode == "vpn") {
+            Text("VPN mode uses system-wide capture (VpnService). Traffic is routed per your app rules below.",
+                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+        }
+
+        // Routing rules
+        Text("Traffic routing:", color = MaterialTheme.colorScheme.onSurface)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            FilterChip(
+                selected = editing.routing.mode == "all",
+                onClick = { persist(editing.copy(routing = editing.routing.copy(mode = "all"))) },
+                label = { Text("All apps") }
+            )
+            FilterChip(
+                selected = editing.routing.mode == "allow",
+                onClick = { persist(editing.copy(routing = editing.routing.copy(mode = "allow"))) },
+                label = { Text("Allow list") }
+            )
+            FilterChip(
+                selected = editing.routing.mode == "block",
+                onClick = { persist(editing.copy(routing = editing.routing.copy(mode = "block"))) },
+                label = { Text("Block list") }
+            )
+        }
+
+        val activeRules = when (editing.routing.mode) {
+            "allow" -> editing.routing.allowedApps
+            "block" -> editing.routing.blockedApps
+            else -> emptyList()
+        }
+        if (editing.routing.mode == "allow" || editing.routing.mode == "block") {
+            Text(if (editing.routing.mode == "allow") "Apps sent through the tunnel:" else "Apps using direct connection:",
+                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+            Button(onClick = {
+                pickerList = editing.routing.mode
+                showAppPicker = true
+            }) { Text("Add app") }
+            activeRules.forEach { rule ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${rule.appName} (${rule.packageName})", Modifier.weight(1f),
+                         color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp)
+                    SmallButton("Remove") {
+                        val updatedRules = activeRules.filterNot { it.packageName == rule.packageName }
+                        val newRouting = if (editing.routing.mode == "allow")
+                            editing.routing.copy(allowedApps = updatedRules)
+                        else
+                            editing.routing.copy(blockedApps = updatedRules)
+                        persist(editing.copy(routing = newRouting))
+                    }
+                }
+            }
+        }
+
+        Divider()
+        Text("Changes apply after Stop/Start.",
+             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+    }
+
+    if (showNameDialog) {
+        var name by remember { mutableStateOf(if (dialogKind == "rename") editing.name else "") }
+        AlertDialog(
+            onDismissRequest = { showNameDialog = false },
+            title = { Text(if (dialogKind == "new") "New profile" else if (dialogKind == "rename") "Rename profile" else "Duplicate profile") },
+            text = {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text("Profile name") },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        cursorColor = MaterialTheme.colorScheme.primary,
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val finalName = name.trim().ifEmpty { "Profile" }
+                    when (dialogKind) {
+                        "new" -> {
+                            val p = VpnProfile(name = finalName)
+                            configManager.addProfile(p)
+                            editing = p
+                            profiles = configManager.loadProfiles()
+                        }
+                        "rename" -> persist(editing.copy(name = finalName))
+                        "duplicate" -> {
+                            val p = editing.copy(id = java.util.UUID.randomUUID().toString(), name = finalName)
+                            configManager.addProfile(p)
+                            editing = p
+                            profiles = configManager.loadProfiles()
+                        }
+                    }
+                    showNameDialog = false
+                }) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { showNameDialog = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (showAppPicker) {
+        AppPickerDialog(
+            apps = installedApps,
+            onDismiss = { showAppPicker = false },
+            onPick = { rule ->
+                val list = if (pickerList == "allow") editing.routing.allowedApps else editing.routing.blockedApps
+                if (list.none { it.packageName == rule.packageName }) {
+                    val newRules = list + rule
+                    val newRouting = if (pickerList == "allow")
+                        editing.routing.copy(allowedApps = newRules)
+                    else
+                        editing.routing.copy(blockedApps = newRules)
+                    persist(editing.copy(routing = newRouting))
+                }
+                showAppPicker = false
+            }
+        )
+    }
+}
+
+fun getInstalledApps(context: Context): List<AppRule> {
+    val pm = context.packageManager
+    return try {
+        pm.getInstalledApplications(0).mapNotNull { ai ->
+            val label = try { pm.getApplicationLabel(ai).toString() } catch (_: Exception) { ai.packageName }
+            AppRule(ai.packageName, label)
+        }.sortedBy { it.appName.lowercase() }
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
+@Composable
+fun AppPickerDialog(apps: List<AppRule>, onDismiss: () -> Unit, onPick: (AppRule) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(query, apps) {
+        if (query.isBlank()) apps else apps.filter {
+            it.appName.contains(query, ignoreCase = true) || it.packageName.contains(query, ignoreCase = true)
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Select app") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    label = { Text("Search") },
+                    colors = OutlinedTextFieldDefaults.colors(cursorColor = MaterialTheme.colorScheme.primary)
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.height(400.dp)) {
+                    itemsIndexed(filtered) { _, app ->
+                        TextButton(onClick = { onPick(app) }, modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.align(Alignment.CenterVertically)) {
+                                Text(app.appName, color = MaterialTheme.colorScheme.onSurface)
+                                Text(app.packageName, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), fontSize = 11.sp)
+                            }
+                        }
+                        Divider()
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }
 
