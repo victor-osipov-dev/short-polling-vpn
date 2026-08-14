@@ -246,7 +246,7 @@ class ClientTunnel:
         ts = str(int(time.time()))
         mac = sign(self.hmac_key, self.client_id + ts.encode() + blob)
 
-        params = {"t": ts, "nonce": os.urandom(5).hex()}
+        params = {"t": ts}
         headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac, "X-Proto": PROTO_VERSION}
         if self.host_header:
             headers["Host"] = self.host_header
