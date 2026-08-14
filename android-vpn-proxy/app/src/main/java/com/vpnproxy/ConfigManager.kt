@@ -25,6 +25,7 @@ data class ProxyConfig(
     val dnsRelayEnabled: Boolean = false,
     val dnsBindHost: String = "127.0.0.1",
     val dnsBindPort: Int = 5353,
+    val loggingLevel: String = "INFO",
 ) {
     fun toJson(): JSONObject {
         return JSONObject().apply {
@@ -58,7 +59,7 @@ data class ProxyConfig(
                 put("hmac_window_seconds", hmacWindowSeconds)
             })
             put("logging", JSONObject().apply {
-                put("level", "INFO")
+                put("level", loggingLevel)
             })
         }
     }
@@ -73,6 +74,7 @@ data class ProxyConfig(
             val security = obj.optJSONObject("security") ?: JSONObject()
             val idleTimeout = client.optJSONObject("idle_timeout") ?: JSONObject()
             val dnsRelay = client.optJSONObject("dns_relay") ?: JSONObject()
+            val logging = obj.optJSONObject("logging") ?: JSONObject()
             return ProxyConfig(
                 serverUrl = client.optString("server_url", defaults.serverUrl),
                 pollPath = client.optString("poll_path", defaults.pollPath),
@@ -92,6 +94,7 @@ data class ProxyConfig(
                 dnsRelayEnabled = dnsRelay.optBoolean("enabled", defaults.dnsRelayEnabled),
                 dnsBindHost = dnsRelay.optString("bind_host", defaults.dnsBindHost),
                 dnsBindPort = dnsRelay.optInt("bind_port", defaults.dnsBindPort),
+                loggingLevel = logging.optString("level", defaults.loggingLevel),
             )
         }
     }

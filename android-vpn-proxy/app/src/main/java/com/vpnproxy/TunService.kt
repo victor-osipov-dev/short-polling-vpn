@@ -13,6 +13,7 @@ import androidx.core.app.NotificationCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.RandomAccessFile
 
 class TunService : VpnService() {
 
@@ -27,6 +28,8 @@ class TunService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var handler: Handler? = null
+    @Volatile
+    private var tailRunning = false
 
     override fun onCreate() {
         super.onCreate()
@@ -128,6 +131,7 @@ class TunService : VpnService() {
         )
         val logFile = File(filesDir, "tun2socks.log")
 
+        log("launching tun2socks: ${bin.absolutePath} fd=$fd socks=127.0.0.1:${profile.config.socksBindPort}")
         TunRunner.launch(fd, argv, logFile.absolutePath) { code ->
             log("tun2socks exited: $code")
             handler?.post {
@@ -136,10 +140,12 @@ class TunService : VpnService() {
             }
         }
         log("VPN established on $VPN_ADDR, socks→127.0.0.1:${profile.config.socksBindPort}")
+        startLogTailer(logFile)
         updateNotification("VPN running")
     }
 
     private fun stopVpn() {
+        tailRunning = false
         TunRunner.stop()
         try {
             vpnInterface?.close()
@@ -169,6 +175,35 @@ class TunService : VpnService() {
             log("Binary extract failed: ${e.message}")
             return null
         }
+    }
+
+    private fun startLogTailer(logFile: File) {
+        Thread {
+            var position = if (logFile.exists()) logFile.length() else 0L
+            while (tailRunning) {
+                try {
+                    val len = logFile.length()
+                    if (len > position && logFile.exists()) {
+                        val raf = RandomAccessFile(logFile, "r")
+                        raf.seek(position)
+                        val buf = ByteArray((len - position).toInt().coerceAtMost(64 * 1024))
+                        val read = raf.read(buf)
+                        raf.close()
+                        position += read
+                        String(buf, 0, read, Charsets.UTF_8)
+                            .split("\n")
+                            .filter { it.isNotBlank() }
+                            .forEach { log("[tun] $it") }
+                    }
+                } catch (_: Exception) {
+                }
+                try {
+                    Thread.sleep(500)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+            }
+        }.start()
     }
 
     private fun createNotificationChannel() {
