@@ -739,10 +739,12 @@ def _run(config_path: str, log_cb):
         # Configure Python logging from config file
         log_level = cfg.get("logging", {}).get("level", "INFO").upper()
         root = logging.getLogger()
-        root.setLevel(getattr(logging, log_level, logging.INFO))
+        root.setLevel(logging.WARNING)
         ch = LogCallbackHandler(log_cb)
         ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
         root.addHandler(ch)
+        app_logger = logging.getLogger("proxy")
+        app_logger.setLevel(getattr(logging, log_level, logging.INFO))
 
         logger.info("Log level set to %s", log_level)
         logger.debug("Config loaded: server_url=%s", cfg.get("client", {}).get("server_url"))
