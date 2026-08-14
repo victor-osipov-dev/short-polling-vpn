@@ -196,7 +196,30 @@ fun SimpleConfigTab(configManager: ConfigManager) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        ConfigTextField("Server URL", cfg.serverUrl) { save(cfg.copy(serverUrl = it)) }
+        ConfigTextField(
+            "Server URLs (one per line)",
+            (if (cfg.serverUrls.isNotEmpty()) cfg.serverUrls else listOf(cfg.serverUrl)).joinToString("\n"),
+            singleLine = false
+        ) {
+            val lines = it.lines().map { l -> l.trim() }.filter { l -> l.isNotEmpty() }
+            save(cfg.copy(serverUrl = lines.firstOrNull() ?: cfg.serverUrl, serverUrls = lines))
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("URL select:", color = MaterialTheme.colorScheme.onSurface)
+            FilterChip(
+                selected = cfg.serverSelector == "round",
+                onClick = { save(cfg.copy(serverSelector = "round")) },
+                label = { Text("Round") }
+            )
+            FilterChip(
+                selected = cfg.serverSelector == "random",
+                onClick = { save(cfg.copy(serverSelector = "random")) },
+                label = { Text("Random") }
+            )
+        }
+
         ConfigTextField("Poll Path", cfg.pollPath) { save(cfg.copy(pollPath = it)) }
         ConfigTextField("Host header (optional)", cfg.hostHeader) { save(cfg.copy(hostHeader = it)) }
         ConfigTextField("PSK", cfg.psk, singleLine = false) { save(cfg.copy(psk = it)) }

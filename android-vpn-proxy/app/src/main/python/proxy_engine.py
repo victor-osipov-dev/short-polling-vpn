@@ -166,7 +166,11 @@ class ClientTunnel:
         sec_cfg = cfg["security"]
 
         self.client_id = os.urandom(16)
-        self.server_base = client_cfg["server_url"].rstrip("/")
+        urls = client_cfg.get("server_urls") or [client_cfg.get("server_url", "")]
+        self.server_urls = [u.rstrip("/") for u in urls if u]
+        self.server_base = self.server_urls[0] if self.server_urls else client_cfg.get("server_url", "").rstrip("/")
+        self.server_selector = str(client_cfg.get("server_selector", "round")).lower()
+        self._rr_index = 0
         self.poll_path = client_cfg.get("poll_path", "/poll")
         self.server_url = self.server_base + self.poll_path
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
@@ -375,6 +379,16 @@ class ClientTunnel:
             delay_ms = max(10, self.poll_interval_ms + jitter)
             await asyncio.sleep(delay_ms / 1000)
 
+    def _pick_server_base(self):
+        """Выбирает базу URL на каждый poll: round-robin или random."""
+        if not self.server_urls:
+            return ""
+        if len(self.server_urls) == 1 or self.server_selector == "random":
+            return random.choice(self.server_urls)
+        base = self.server_urls[self._rr_index % len(self.server_urls)]
+        self._rr_index += 1
+        return base
+
     def _random_path(self):
         """Генерирует случайное 'CDN-образное' продолжение пути поверх poll_path."""
         r = random
@@ -498,7 +512,7 @@ class ClientTunnel:
             self._poll_count += 1
             if self._poll_count % 25 == 0:
                 logger.debug(f"Poll TS={ts} (device time: {time.ctime(now)})")
-            async with self.http.stream(self.poll_method, self.server_base + self._random_path(), **kwargs) as resp:
+            async with self.http.stream(self.poll_method, self._pick_server_base() + self._random_path(), **kwargs) as resp:
                 # Пытаемся синхронизировать время по заголовку Date от сервера
                 if "Date" in resp.headers:
                     try:

@@ -8,6 +8,8 @@ import java.util.UUID
 
 data class ProxyConfig(
     val serverUrl: String = "https://185.68.246.229:443",
+    val serverUrls: List<String> = emptyList(),
+    val serverSelector: String = "round",
     val pollPath: String = "/poll",
     val pollIntervalMs: Int = 50,
     val pollJitterMs: Int = 5,
@@ -27,6 +29,9 @@ data class ProxyConfig(
     val dnsBindPort: Int = 5353,
     val loggingLevel: String = "INFO",
 ) {
+    fun effectiveServerUrls(): List<String> =
+        if (serverUrls.isNotEmpty()) serverUrls else listOf(serverUrl)
+
     fun toJson(): JSONObject {
         return JSONObject().apply {
             put("mode", "client")
@@ -36,6 +41,8 @@ data class ProxyConfig(
                     put("bind_port", socksBindPort)
                 })
                 put("server_url", serverUrl)
+                put("server_urls", JSONArray().apply { effectiveServerUrls().forEach { put(it) } })
+                put("server_selector", serverSelector)
                 put("poll_path", pollPath)
                 put("poll_interval_ms", pollIntervalMs)
                 put("poll_jitter_ms", pollJitterMs)
@@ -77,6 +84,10 @@ data class ProxyConfig(
             val logging = obj.optJSONObject("logging") ?: JSONObject()
             return ProxyConfig(
                 serverUrl = client.optString("server_url", defaults.serverUrl),
+                serverUrls = (client.optJSONArray("server_urls") ?: JSONArray()).let { arr ->
+                    (0 until arr.length()).map { arr.getString(it).trim() }.filter { it.isNotEmpty() }
+                },
+                serverSelector = client.optString("server_selector", defaults.serverSelector),
                 pollPath = client.optString("poll_path", defaults.pollPath),
                 pollIntervalMs = client.optInt("poll_interval_ms", defaults.pollIntervalMs),
                 pollJitterMs = client.optInt("poll_jitter_ms", defaults.pollJitterMs),

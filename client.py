@@ -59,7 +59,11 @@ class ClientTunnel:
         sec_cfg = cfg["security"]
 
         self.client_id = os.urandom(16)
-        self.server_base = client_cfg["server_url"].rstrip("/")
+        urls = client_cfg.get("server_urls") or [client_cfg.get("server_url", "")]
+        self.server_urls = [u.rstrip("/") for u in urls if u]
+        self.server_base = self.server_urls[0] if self.server_urls else client_cfg.get("server_url", "").rstrip("/")
+        self.server_selector = str(client_cfg.get("server_selector", "round")).lower()
+        self._rr_index = 0
         self.poll_path = client_cfg.get("poll_path", "/poll")
         self.server_url = self.server_base + self.poll_path
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
@@ -210,6 +214,16 @@ class ClientTunnel:
             delay_ms = max(10, self.poll_interval_ms + jitter)
             await asyncio.sleep(delay_ms / 1000)
 
+    def _pick_server_base(self):
+        """Выбирает базу URL на каждый poll: round-robin или random."""
+        if not self.server_urls:
+            return ""
+        if len(self.server_urls) == 1 or self.server_selector == "random":
+            return random.choice(self.server_urls)
+        base = self.server_urls[self._rr_index % len(self.server_urls)]
+        self._rr_index += 1
+        return base
+
     async def _poll_once(self):
         frames_to_send = []
         async with self.lock:
@@ -260,7 +274,7 @@ class ClientTunnel:
         logger.debug(f"[client] poll: {self.poll_method} data_in={self.poll_data_in} "
                      f"{len(frames_to_send)} frames, {len(blob)}B blob")
         try:
-            async with self.http.stream(self.poll_method, self.server_url, **kwargs) as resp:
+            async with self.http.stream(self.poll_method, self._pick_server_base() + self.poll_path, **kwargs) as resp:
                 resp.raise_for_status()
                 await self._handle_stream_response(resp)
         except Exception as e:
