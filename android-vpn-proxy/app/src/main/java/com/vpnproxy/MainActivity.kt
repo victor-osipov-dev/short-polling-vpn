@@ -161,14 +161,14 @@ fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>) 
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
             TabRow(selectedTabIndex = tab) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Simple") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Profiles") })
+                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Profiles") })
+                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Simple") })
                 Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Config") })
                 Tab(selected = tab == 3, onClick = { tab = 3 }, text = { Text("Log") })
             }
             when (tab) {
-                0 -> SimpleConfigTab(configManager)
-                1 -> ProfilesTab(configManager)
+                0 -> ProfilesTab(configManager)
+                1 -> SimpleConfigTab(configManager)
                 2 -> RawConfigTab(configManager)
                 3 -> LogTab(logs, autoScroll, { autoScroll = it })
             }
@@ -435,15 +435,15 @@ fun ProfilesTab(configManager: ConfigManager) {
             Button(
                 onClick = { dialogKind = "new"; showNameDialog = true },
                 modifier = Modifier.weight(1f)
-            ) { Text("New") }
+            ) { Text("New", maxLines = 1, fontSize = 13.sp) }
             Button(
                 onClick = { dialogKind = "rename"; showNameDialog = true },
                 modifier = Modifier.weight(1f)
-            ) { Text("Rename") }
+            ) { Text("Rename", maxLines = 1, fontSize = 13.sp) }
             Button(
                 onClick = { dialogKind = "duplicate"; showNameDialog = true },
                 modifier = Modifier.weight(1f)
-            ) { Text("Duplicate") }
+            ) { Text("Duplicate", maxLines = 1, fontSize = 12.sp) }
         }
 
         // Mode selection
@@ -617,7 +617,7 @@ fun AppPickerDialog(apps: List<AppRule>, onDismiss: () -> Unit, onPick: (AppRule
                 LazyColumn(modifier = Modifier.height(400.dp)) {
                     itemsIndexed(filtered) { _, app ->
                         TextButton(onClick = { onPick(app) }, modifier = Modifier.fillMaxWidth()) {
-                            Column(Modifier.align(Alignment.CenterVertically)) {
+                            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
                                 Text(app.appName, color = MaterialTheme.colorScheme.onSurface)
                                 Text(app.packageName, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), fontSize = 11.sp)
                             }
