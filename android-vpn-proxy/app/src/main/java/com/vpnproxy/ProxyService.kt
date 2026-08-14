@@ -102,9 +102,36 @@ class ProxyService : Service() {
         }, "python-proxy").also { it.start() }
 
         updateNotification("Proxy running")
+
+        if (ConfigManager(this).getActiveProfile().mode == "vpn") {
+            log("Mode is VPN, starting TunService")
+            startTunService()
+        }
+    }
+
+    private fun startTunService() {
+        val intent = Intent(this, TunService::class.java).apply {
+            action = TunService.ACTION_START
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun stopTunService() {
+        try {
+            val intent = Intent(this, TunService::class.java).apply {
+                action = TunService.ACTION_STOP
+            }
+            startService(intent)
+        } catch (_: Exception) {
+        }
     }
 
     private fun stopProxy() {
+        stopTunService()
         pythonStarted = false
         if (Python.isStarted()) {
             try {

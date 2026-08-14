@@ -3,6 +3,8 @@
     <string name="app_name">Short Polling VPN</string>
     <string name="channel_name">Proxy Service</string>
     <string name="channel_desc">Foreground service for Short Polling VPN</string>
+    <string name="vpn_channel_name">VPN Service</string>
+    <string name="vpn_channel_desc">System-wide VPN tunnel (tun2socks)</string>
     <string name="notification_running">Proxy is running</string>
     <string name="start">Start</string>
     <string name="stop">Stop</string>

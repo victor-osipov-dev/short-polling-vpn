@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import android.net.VpnService
 import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.compose.foundation.background
@@ -48,6 +50,29 @@ class MainActivity : ComponentActivity() {
                 if (logs.size > 500) logs.removeAt(0)
             }
         }
+    }
+
+    private val vpnConsent = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            logs.add(LogEntry(++logSeq, "VPN permission granted. Starting service..."))
+            startProxy(this)
+        } else {
+            logs.add(LogEntry(++logSeq, "VPN permission denied"))
+        }
+    }
+
+    fun startProxyWithVpnCheck() {
+        val profile = configManager.getActiveProfile()
+        if (profile.mode == "vpn") {
+            val intent = VpnService.prepare(this)
+            if (intent != null) {
+                vpnConsent.launch(intent)
+                return
+            }
+        }
+        startProxy(this)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -114,7 +139,12 @@ fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>) 
                             stopProxy(context)
                         } else {
                             logs.add(LogEntry(seq, "Start button clicked. Launching service..."))
-                            startProxy(context)
+                            val activity = context as? MainActivity
+                            if (activity != null) {
+                                activity.startProxyWithVpnCheck()
+                            } else {
+                                startProxy(context)
+                            }
                         }
                         isRunning = !isRunning
                     },
