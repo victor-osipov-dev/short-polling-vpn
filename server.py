@@ -201,14 +201,27 @@ class ServerSession:
     def __init__(self, session_id: bytes, writer: asyncio.StreamWriter):
         self.session_id = session_id
         self.writer = writer
+        self.reader: asyncio.StreamReader | None = None
         self.incoming = bytearray()
         self.seq = 0
         self.fin_pending = False
         self.closed = False
+        self.pump_task: asyncio.Task | None = None
 
     def next_seq(self) -> int:
         self.seq += 1
         return self.seq
+
+    def close(self) -> None:
+        """Полностью закрывает сессию: отменяет пум-таск и сокет, чтобы
+        не копить FD/таски/буферы при клиентском FIN или реапе."""
+        self.closed = True
+        if self.pump_task is not None and not self.pump_task.done():
+            self.pump_task.cancel()
+        try:
+            self.writer.close()
+        except Exception:
+            pass
 
 
 class SessionManager:
@@ -219,6 +232,7 @@ class SessionManager:
         self.lock = asyncio.Lock()
         self.max_chunk_bytes = max_chunk_bytes
         self._incoming_cap = max_chunk_bytes * 2  # мягкий предел буфера сессии (backpressure)
+        self._pending_data_cap = max_chunk_bytes * 16  # предел накопления данных для pending-сессии
         self.idle_timeout = idle_timeout
         self._pending_opens: dict[bytes, set[bytes]] = {}
         self._pending_data: dict[bytes, dict[bytes, list[bytes]]] = {}
@@ -276,8 +290,13 @@ class SessionManager:
                 else:
                     async with self.lock:
                         if client_id in self._pending_opens and f.session_id in self._pending_opens[client_id]:
-                            self._pending_data.setdefault(client_id, {}).setdefault(f.session_id, []).append(f.payload)
-                            logger.debug(f"[server] DATA: buffered {len(f.payload)} bytes for pending session {sid}")
+                            buf = self._pending_data.setdefault(client_id, {}).setdefault(f.session_id, [])
+                            used = sum(len(b) for b in buf if b is not None)
+                            if used + len(f.payload) > self._pending_data_cap:
+                                logger.warning(f"[server] DATA: dropping {len(f.payload)}B, pending session {sid} buffer full")
+                            else:
+                                buf.append(f.payload)
+                                logger.debug(f"[server] DATA: buffered {len(f.payload)} bytes for pending session {sid}")
                         else:
                             logger.warning(f"[server] DATA: session {sid} not found or closed")
             elif f.flags & FLAG_FIN:
@@ -285,11 +304,7 @@ class SessionManager:
                 async with self.lock:
                     sess = self.clients.get(client_id, {}).get(f.session_id)
                 if sess is not None:
-                    sess.closed = True
-                    try:
-                        sess.writer.close()
-                    except Exception:
-                        pass
+                    sess.close()
                 else:
                     async with self.lock:
                         if client_id in self._pending_opens and f.session_id in self._pending_opens[client_id]:
@@ -309,6 +324,7 @@ class SessionManager:
             self._cleanup_pending(client_id, session_id)
             return
         sess = ServerSession(session_id, writer)
+        sess.reader = reader
         enable_tcp_keepalive(writer.transport)
 
         buffered = []
@@ -336,7 +352,8 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"[server] flush failed for session {session_id.hex()[:8]}: {e}")
 
-        asyncio.create_task(self._pump_remote_to_buffer(reader, sess))
+        sess.pump_task = asyncio.create_task(self._pump_remote_to_buffer(reader, sess))
+        return sess
 
     def _cleanup_pending_locked(self, client_id: bytes, session_id: bytes):
         if client_id in self._pending_opens:
@@ -448,14 +465,15 @@ class SessionManager:
             async with self.lock:
                 stale = [cid for cid, t in self.last_seen.items() if now - t > self.idle_timeout]
                 for cid in stale:
-                    for sess in self.clients.get(cid, {}).values():
-                        try:
-                            sess.writer.close()
-                        except Exception:
-                            pass
-                    self.clients.pop(cid, None)
-                    self.last_seen.pop(cid, None)
+                    clients_sessions = self.clients.pop(cid, {})
+                    for sess in clients_sessions.values():
+                        sess.close()
+                    # Полная очистка всего состояния клиента (пум-таски и сокеты уже
+                    # закрыты в close(); чистим и pending-буферы, чтобы не копить память).
+                    self._pending_opens.pop(cid, None)
+                    self._pending_data.pop(cid, None)
                     self._dns_replies.pop(cid, None)
+                    self.last_seen.pop(cid, None)
                     logger.info("reaped idle client %s", cid.hex()[:8])
 
 
