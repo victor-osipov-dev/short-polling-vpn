@@ -54,6 +54,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Единственный источник истины о состоянии прокси/VPN: сервисы широковещательно
+    // сообщают running = true/false через STATE. Кнопка Start/Stop синхронизируется
+    // с реальным состоянием (в т.ч. когда VPN отзывается системой из-за другого VPN).
+    val isRunning = mutableStateOf(false)
+
+    private val stateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.vpnproxy.STATE") {
+                isRunning.value = intent.getBooleanExtra("running", false)
+            }
+        }
+    }
+
     private val vpnConsent = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -81,8 +94,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         configManager = ConfigManager(this)
 
+        // Отражаем фактическое состояние сервиса (полезно после рестарта процесса,
+        // когда сервис уже работает — START_STICKY).
+        isRunning.value = ProxyService.isProxyRunning
+
         val filter = IntentFilter("com.vpnproxy.LOG")
         ContextCompat.registerReceiver(this, logReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, stateReceiver, IntentFilter("com.vpnproxy.STATE"),
+            ContextCompat.RECEIVER_NOT_EXPORTED)
 
         setContent {
             MaterialTheme(
@@ -97,22 +116,22 @@ class MainActivity : ComponentActivity() {
                     onBackground = Color.White,
                 )
             ) {
-                MainScreen(configManager, logs)
+                MainScreen(configManager, logs, isRunning)
             }
         }
     }
 
     override fun onDestroy() {
         unregisterReceiver(logReceiver)
+        unregisterReceiver(stateReceiver)
         super.onDestroy()
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>) {
+fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>, isRunning: MutableState<Boolean>) {
     var tab by remember { mutableIntStateOf(0) }
-    var isRunning by remember { mutableStateOf(false) }
     var autoScroll by remember { mutableStateOf(true) }
 
     // Список приложений грузится один раз асинхронно на IO и кэшируется на уровне
@@ -145,7 +164,7 @@ fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>) 
                 Button(
                     onClick = {
                         val seq = logs.size.toLong() + 1
-                        if (isRunning) {
+                        if (isRunning.value) {
                             logs.add(LogEntry(seq, "Stopping proxy service..."))
                             stopProxy(context)
                         } else {
@@ -157,15 +176,14 @@ fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>) 
                                 startProxy(context)
                             }
                         }
-                        isRunning = !isRunning
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isRunning) Color(0xFFEF5350)
+                        containerColor = if (isRunning.value) Color(0xFFEF5350)
                         else Color(0xFF4CAF50)
                     )
                 ) {
-                    Text(if (isRunning) "Stop" else "Start", fontSize = 16.sp)
+                    Text(if (isRunning.value) "Stop" else "Start", fontSize = 16.sp)
                 }
             }
         }

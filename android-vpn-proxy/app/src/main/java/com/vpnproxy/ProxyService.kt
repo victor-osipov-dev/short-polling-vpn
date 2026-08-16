@@ -23,6 +23,12 @@ class ProxyService : Service() {
         const val NOTIFICATION_ID = 1
         const val ACTION_START = "com.vpnproxy.START"
         const val ACTION_STOP = "com.vpnproxy.STOP"
+        const val ACTION_STATE = "com.vpnproxy.STATE"
+
+        // Разделяемое состояние: позволяет UI прочитать фактическое состояние
+        // сервиса при запуске Activity (если сервис уже работает после рестарта процесса).
+        @Volatile
+        var isProxyRunning = false
     }
 
     private var pythonThread: Thread? = null
@@ -39,6 +45,15 @@ class ProxyService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+    }
+
+    private fun broadcastState(running: Boolean) {
+        isProxyRunning = running
+        sendBroadcast(Intent(ACTION_STATE).apply {
+            action = ACTION_STATE
+            putExtra("running", running)
+            setPackage(packageName)
+        })
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -102,6 +117,7 @@ class ProxyService : Service() {
         }, "python-proxy").also { it.start() }
 
         updateNotification("Proxy running")
+        broadcastState(true)
 
         if (ConfigManager(this).getActiveProfile().mode == "vpn") {
             log("Mode is VPN, starting TunService")
@@ -142,6 +158,7 @@ class ProxyService : Service() {
         }
         pythonThread?.interrupt()
         pythonThread = null
+        broadcastState(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }

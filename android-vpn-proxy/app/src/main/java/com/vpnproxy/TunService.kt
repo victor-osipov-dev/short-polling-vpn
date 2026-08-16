@@ -174,6 +174,21 @@ class TunService : VpnService() {
         super.onDestroy()
     }
 
+    // Система отзывает наш VPN (например, пользователь запустил другой VPN).
+    // vpnInterface уже бесполезен — останавливаем всё и сообщаем UI.
+    override fun onRevoke() {
+        super.onRevoke()
+        log("VPN revoked by system (another VPN started?)")
+        try {
+            val stop = Intent(this, ProxyService::class.java).apply {
+                action = ProxyService.ACTION_STOP
+            }
+            startService(stop)
+        } catch (_: Exception) {
+        }
+        stopVpn()
+    }
+
     private fun extractBinary(): File? {
         val bin = File(applicationInfo.nativeLibraryDir, "libtun2socks.so")
         if (bin.exists()) return bin
