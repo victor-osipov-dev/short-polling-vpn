@@ -35,6 +35,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 data class LogEntry(val id: Long, val text: String)
@@ -113,6 +115,15 @@ fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>) 
     var isRunning by remember { mutableStateOf(false) }
     var autoScroll by remember { mutableStateOf(true) }
 
+    // Список приложений грузится один раз асинхронно на IO и кэшируется на уровне
+    // MainScreen (он всегда в композиции), а не на вкладке Profiles — иначе он
+    // пересчитывался бы (сотни синхронных binder-вызовов) при каждом переключении вкладки.
+    val appContext = LocalContext.current
+    var installedApps by remember { mutableStateOf<List<AppRule>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        installedApps = withContext(Dispatchers.IO) { getInstalledApps(appContext) }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -167,7 +178,7 @@ fun MainScreen(configManager: ConfigManager, logs: SnapshotStateList<LogEntry>) 
                 Tab(selected = tab == 3, onClick = { tab = 3 }, text = { Text("Log") })
             }
             when (tab) {
-                0 -> ProfilesTab(configManager)
+                0 -> ProfilesTab(configManager, installedApps)
                 1 -> SimpleConfigTab(configManager)
                 2 -> RawConfigTab(configManager)
                 3 -> LogTab(logs, autoScroll, { autoScroll = it })
@@ -395,14 +406,12 @@ fun ConfigTextField(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProfilesTab(configManager: ConfigManager) {
+fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
     var profiles by remember { mutableStateOf(configManager.loadProfiles()) }
     var activeId by remember { mutableStateOf(configManager.getActiveProfile().id) }
     var editing by remember { mutableStateOf(configManager.getActiveProfile()) }
     var showNameDialog by remember { mutableStateOf(false) }
     var dialogKind by remember { mutableStateOf("new") } // new | rename | duplicate
-    val appContext = LocalContext.current
-    val installedApps = remember { getInstalledApps(appContext) }
     var showAppPicker by remember { mutableStateOf(false) }
     var pickerList by remember { mutableStateOf("allow") } // allow | block
     var pendingDelete by remember { mutableStateOf<VpnProfile?>(null) }
