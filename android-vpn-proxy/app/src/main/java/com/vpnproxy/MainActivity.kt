@@ -67,6 +67,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val vpnConsentReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.vpnproxy.REQUEST_VPN_CONSENT") {
+                // Пришло из Quick Settings tile: нужен запрос согласия на VPN,
+                // который может открыть только Activity.
+                startProxyWithVpnCheck()
+            }
+        }
+    }
+
     private val vpnConsent = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -102,6 +112,8 @@ class MainActivity : ComponentActivity() {
         ContextCompat.registerReceiver(this, logReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, stateReceiver, IntentFilter("com.vpnproxy.STATE"),
             ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, vpnConsentReceiver, IntentFilter("com.vpnproxy.REQUEST_VPN_CONSENT"),
+            ContextCompat.RECEIVER_NOT_EXPORTED)
 
         setContent {
             MaterialTheme(
@@ -124,6 +136,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         unregisterReceiver(logReceiver)
         unregisterReceiver(stateReceiver)
+        unregisterReceiver(vpnConsentReceiver)
         super.onDestroy()
     }
 }
