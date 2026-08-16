@@ -274,7 +274,7 @@ class SessionManager:
                     self._pending_opens.setdefault(client_id, set()).add(f.session_id)
                 asyncio.create_task(self._open_remote(client_id, f.session_id, host, port))
             elif f.flags & FLAG_DNS:
-                logger.info(f"[server] DNS: client {cid} query {len(f.payload)}B (sid {sid})")
+                logger.debug(f"[server] DNS: client {cid} query {len(f.payload)}B (sid {sid})")
                 asyncio.create_task(self._resolve_dns(client_id, f.session_id, f.payload))
             elif f.flags & FLAG_DATA:
                 async with self.lock:
@@ -312,7 +312,7 @@ class SessionManager:
                             logger.debug(f"[server] FIN: buffered for pending session {sid}")
 
     async def _open_remote(self, client_id: bytes, session_id: bytes, host: str, port: int):
-        logger.info(f"[server] attempting to connect to {host}:{port}")
+        logger.debug(f"[server] attempting to connect to {host}:{port}")
         try:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
         except asyncio.TimeoutError:
@@ -333,7 +333,7 @@ class SessionManager:
             self._cleanup_pending_locked(client_id, session_id)
             buffered = self._pending_data.get(client_id, {}).pop(session_id, [])
 
-        logger.info(f"[server] opened remote {host}:{port} for session {session_id.hex()[:8]}")
+        logger.debug(f"[server] opened remote {host}:{port} for session {session_id.hex()[:8]}")
 
         if buffered:
             for data in buffered:
@@ -348,7 +348,7 @@ class SessionManager:
                 sess.writer.write(data)
             try:
                 await sess.writer.drain()
-                logger.info(f"[server] flushed {len(buffered)} buffered frames for session {session_id.hex()[:8]}")
+                logger.debug(f"[server] flushed {len(buffered)} buffered frames for session {session_id.hex()[:8]}")
             except Exception as e:
                 logger.error(f"[server] flush failed for session {session_id.hex()[:8]}: {e}")
 
@@ -380,7 +380,7 @@ class SessionManager:
                     await asyncio.sleep(0.05)
                 data = await reader.read(self.max_chunk_bytes)
                 if not data:
-                    logger.info(f"[server] session {sid} got EOF from remote")
+                    logger.debug(f"[server] session {sid} got EOF from remote")
                     break
                 logger.debug(f"[server] pump: session {sid} buffered {len(data)} bytes from remote")
                 async with self.lock:
@@ -392,7 +392,7 @@ class SessionManager:
         finally:
             async with self.lock:
                 sess.fin_pending = True
-            logger.info(f"[server] pump finished for session {sid}")
+            logger.debug(f"[server] pump finished for session {sid}")
 
     async def _resolve_dns(self, client_id: bytes, session_id: bytes, query: bytes):
         """Резолвит raw DNS-запрос через резолверы (с fallback) и кладёт ответ в outbox клиента."""
@@ -485,9 +485,10 @@ async def poll_handler(request: web.Request):
     cid_b64 = request.headers.get("X-Cid")
     mac = request.headers.get("X-Mac")
 
-    logger.info("poll: method=%s path=%s ts=%s cid=%s mac=%s hdrs=%s",
-                request.method, request.path, ts, cid_b64,
-                bool(mac), dict(request.headers))
+    # Каждый poll-запрос — это низкоуровневый шум (клиент опрашивает ~5-20 раз/с).
+    # В INFO он не попадёт: это детальная отладка, доступная только в DEBUG.
+    logger.debug("poll: method=%s path=%s ts=%s cid=%s mac=%s",
+                 request.method, request.path, ts, cid_b64, bool(mac))
 
     if not all([cid_b64, ts, mac]):
         if debug:
