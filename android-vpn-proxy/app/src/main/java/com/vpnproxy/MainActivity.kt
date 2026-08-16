@@ -698,9 +698,9 @@ fun getInstalledApps(context: Context): List<AppRule> {
 fun AppPickerDialog(apps: List<AppRule>, onDismiss: () -> Unit, onPick: (AppRule) -> Unit) {
     var query by remember { mutableStateOf("") }
     var showSystem by remember { mutableStateOf(false) }
-    val visible = remember {
-        if (showSystem) apps else apps.filter { !it.system }
-    }
+    // Без remember {} с ключами: просто пересчитываем при каждом состоянии,
+    // иначе видимость привязалась бы к первому значению showSystem.
+    val visible = if (showSystem) apps else apps.filter { !it.system }
     val filtered = remember(query, visible) {
         if (query.isBlank()) visible else visible.filter {
             it.appName.contains(query, ignoreCase = true) || it.packageName.contains(query, ignoreCase = true)
