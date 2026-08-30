@@ -13,3 +13,5 @@ venv/
 env/
 *.log
 config.yaml
+*.spec
+*.exe
