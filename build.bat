@@ -16,6 +16,11 @@ pyinstaller --noconfirm --onefile --windowed ^
     --hidden-import h2 ^
     --hidden-import cryptography ^
     --hidden-import aiohttp ^
+    --hidden-import tunnel ^
+    --hidden-import cdn_paths ^
+    --hidden-import socks5_server ^
+    --hidden-import protocol ^
+    --hidden-import crypto_utils ^
     --collect-all httpx ^
     --collect-all httpcore ^
     vpn_gui.py

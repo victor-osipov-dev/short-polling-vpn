@@ -24,11 +24,10 @@ import time
 
 import yaml
 
-# ── Импорт движка из desktop_client.py ──
-from desktop_client import (
-    ClientTunnel, handle_socks_client, handle_http_client,
-    set_system_proxy_windows,
-)
+# ── Импорт движка из общих модулей ──
+from tunnel import ClientTunnel
+from socks5_server import handle_socks_client
+from desktop_client import handle_http_client, set_system_proxy_windows
 
 
 # ══════════════════════════════════════════════════════════════════════
