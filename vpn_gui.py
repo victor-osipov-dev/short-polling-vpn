@@ -25,6 +25,8 @@ import time
 import yaml
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import pystray
+from PIL import Image, ImageDraw
 
 # ── Импорт движка из общих модулей ──
 from tunnel import ClientTunnel
@@ -155,6 +157,7 @@ class VpnGui:
 
         self._build_ui()
         self._start_config_watcher()
+        self._create_tray_icon()
 
     # ── Построение интерфейса ──
 
@@ -283,6 +286,45 @@ class VpnGui:
         if self.socks_host in ("0.0.0.0", ""):
             return "127.0.0.1"
         return self.socks_host
+
+    # ── System Tray ──
+
+    def _create_tray_icon(self):
+        """Создаёт иконку в системном трее."""
+        icon_image = self._create_tray_image()
+        menu = pystray.Menu(
+            pystray.MenuItem("Show", self._tray_show, default=True),
+            pystray.MenuItem("Quit", self._tray_quit),
+        )
+        self._tray = pystray.Icon("VPN", icon_image, "Short Polling VPN", menu)
+        self._tray_thread = threading.Thread(target=self._tray.run, daemon=True)
+        self._tray_thread.start()
+
+    def _create_tray_image(self):
+        """Создаёт простую иконку 16x16 для трея."""
+        img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([2, 2, 13, 13], fill="#90caf9", outline="#1e88e5")
+        draw.rectangle([5, 5, 10, 10], fill="#1e88e5")
+        return img
+
+    def _tray_show(self, icon=None, item=None):
+        """Показывает окно из трея (в main thread)."""
+        self.root.after(0, self._show_window)
+
+    def _show_window(self):
+        """Показывает и восстанавливает окно."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _tray_quit(self, icon=None, item=None):
+        """Полностью закрывает приложение из трея."""
+        self.root.after(0, self._quit_app)
+
+    def _on_hide(self):
+        """Скрывает окно в трей."""
+        self.root.withdraw()
 
     # ── Hover-эффекты ──
 
@@ -619,7 +661,14 @@ class VpnGui:
         self.root.mainloop()
 
     def _on_close(self):
+        """Скрывает окно в трей вместо закрытия."""
+        self._on_hide()
+
+    def _quit_app(self):
+        """Полностью закрывает приложение."""
         self._stop_config_watcher()
+        if hasattr(self, '_tray') and self._tray:
+            self._tray.stop()
         if self.running:
             self._stop()
         self.root.destroy()

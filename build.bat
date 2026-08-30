@@ -21,8 +21,13 @@ pyinstaller --noconfirm --onefile --windowed ^
     --hidden-import socks5_server ^
     --hidden-import protocol ^
     --hidden-import crypto_utils ^
+    --hidden-import pystray ^
+    --hidden-import PIL ^
+    --hidden-import PIL.Image ^
+    --hidden-import PIL.ImageDraw ^
     --collect-all httpx ^
     --collect-all httpcore ^
+    --collect-all pystray ^
     vpn_gui.py
 
 echo.
