@@ -98,22 +98,21 @@ class TkLogHandler(logging.Handler):
 # ══════════════════════════════════════════════════════════════════════
 
 class ConfigFileHandler(FileSystemEventHandler):
-    """Срабатывает при изменении config.yaml — вызывает callback в main thread."""
+    """Срабатывает при изменении config.yaml — планирует callback в main thread."""
 
-    def __init__(self, config_path: str, callback):
+    def __init__(self, config_path: str, root, callback):
         super().__init__()
         self._config_path = os.path.abspath(config_path)
+        self._root = root
         self._callback = callback
         self._last_event = 0
 
     def on_modified(self, event):
         if os.path.abspath(event.src_path) == self._config_path:
             now = time.time()
-            # Дебаунс: игнорируем повторные события за 1с
             if now - self._last_event > 1.0:
                 self._last_event = now
-                # Вызываем callback в main thread (tkinter)
-                self._callback()
+                self._root.after(0, self._callback)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -155,6 +154,7 @@ class VpnGui:
             pass
 
         self._build_ui()
+        self._start_config_watcher()
 
     # ── Построение интерфейса ──
 
@@ -357,7 +357,7 @@ class VpnGui:
     def _start_config_watcher(self):
         """Запускает watchdog observer для отслеживания изменений config.yaml."""
         self._stop_config_watcher()
-        handler = ConfigFileHandler(self.config_path, self._on_config_changed)
+        handler = ConfigFileHandler(self.config_path, self.root, self._on_config_changed)
         self._observer = Observer()
         self._observer.schedule(handler, path=os.path.dirname(os.path.abspath(self.config_path)), recursive=False)
         self._observer.start()
