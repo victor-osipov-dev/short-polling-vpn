@@ -183,7 +183,8 @@ class VpnGui:
         info_grid = tk.Frame(card2, bg=BG_CARD)
         info_grid.pack(fill=tk.X, padx=14, pady=(0, 10))
 
-        labels = [
+        self._info_labels = {}
+        info_items = [
             ("SOCKS5:", f"{self._display_host()}:{self.socks_port}"),
             ("HTTP CONNECT:", f"{self._display_host()}:{self.http_port}"),
             ("Poll interval:", f"{self.cfg['client'].get('poll_interval_ms', 200)} ms"),
@@ -191,11 +192,13 @@ class VpnGui:
             ("Data in:", self.cfg["client"].get("poll_data_in", "body")),
             ("TLS verify:", "ON" if self.cfg["client"].get("verify_tls", True) else "OFF"),
         ]
-        for i, (k, v) in enumerate(labels):
+        for i, (k, v) in enumerate(info_items):
             tk.Label(info_grid, text=k, font=("Segoe UI", 10), bg=BG_CARD,
                      fg=FG_DIM, anchor=tk.W).grid(row=i, column=0, sticky=tk.W, pady=2)
-            tk.Label(info_grid, text=v, font=("Consolas", 10), bg=BG_CARD,
-                     fg=FG_TEXT, anchor=tk.W).grid(row=i, column=1, sticky=tk.W, padx=(12, 0), pady=2)
+            lbl = tk.Label(info_grid, text=v, font=("Consolas", 10), bg=BG_CARD,
+                     fg=FG_TEXT, anchor=tk.W)
+            lbl.grid(row=i, column=1, sticky=tk.W, padx=(12, 0), pady=2)
+            self._info_labels[k] = lbl
 
         info_grid.columnconfigure(1, weight=1)
 
@@ -354,20 +357,18 @@ class VpnGui:
         self.root.after(5000, self._schedule_config_reload)
 
     def _update_server_display(self):
-        """Обновляет отображение серверов в интерфейсе."""
+        """Обновляет отображение настроек в интерфейсе."""
         try:
-            # Находим карточку серверов и обновляем
-            for widget in self.root.winfo_children():
-                if isinstance(widget, tk.Frame) and widget.cget("bg") == BG_CARD:
-                    labels = [w for w in widget.winfo_children() if isinstance(w, tk.Frame)]
-                    # Простой способ — обновить info_label с текущими серверами
-                    pass
-            # Обновляем info_label с текущим poll_interval
-            if self._tunnel:
-                self.info_label.configure(
-                    text=f"SOCKS5:{self.socks_port}  HTTP:{self.http_port}  "
-                         f"Interval:{self._tunnel.poll_interval_ms}ms"
-                )
+            client_cfg = self.cfg.get("client", {})
+            updates = {
+                "Poll interval:": f"{client_cfg.get('poll_interval_ms', 200)} ms",
+                "Method:": client_cfg.get("poll_method", "POST"),
+                "Data in:": client_cfg.get("poll_data_in", "body"),
+                "TLS verify:": "ON" if client_cfg.get("verify_tls", True) else "OFF",
+            }
+            for key, val in updates.items():
+                if key in self._info_labels:
+                    self._info_labels[key].configure(text=val)
         except Exception:
             pass
 
