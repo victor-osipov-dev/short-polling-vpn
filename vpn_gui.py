@@ -35,24 +35,23 @@ from desktop_client import handle_http_client, set_system_proxy_windows
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Цветовая палитра — Light Retro (Apple/IBM PC стиль)
+#  Цветовая палитра — Soft Dark
 # ══════════════════════════════════════════════════════════════════════
 
-BG_MAIN     = "#f5f0e1"
-BG_PANEL    = "#ebe5d0"
-BG_LOG      = "#faf8f0"
-FG_TEXT     = "#2c2416"
-FG_LABEL    = "#5a4a32"
-FG_VALUE    = "#1a6b3c"
-FG_BLUE     = "#2a5298"
-FG_RED      = "#b83232"
-FG_AMBER    = "#8b6914"
-BORDER      = "#c4b89a"
-BORDER_DARK = "#a09070"
-BTN_ON      = "#4a8c5c"
-BTN_OFF     = "#a85454"
-BTN_HOVER_ON = "#3a7a4c"
-BTN_HOVER_OFF = "#984444"
+BG_MAIN     = "#1e1e2e"
+BG_PANEL    = "#252536"
+BG_LOG      = "#1a1a28"
+FG_TEXT     = "#cdd6f4"
+FG_LABEL    = "#7f849c"
+FG_GREEN    = "#a6e3a1"
+FG_RED      = "#f38ba8"
+FG_BLUE     = "#89b4fa"
+FG_AMBER    = "#f9e2af"
+BORDER      = "#45475a"
+BTN_ON      = "#40a02b"
+BTN_OFF     = "#d20f39"
+BTN_HOVER_ON = "#369020"
+BTN_HOVER_OFF = "#b80d32"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -161,121 +160,119 @@ class VpnGui:
 
     def _build_ui(self):
         root = self.root
-        RETRO   = ("Courier New", 10)
-        RETRO_B = ("Courier New", 10, "bold")
-        RETRO_S = ("Courier New", 9)
-        RETRO_L = ("Courier New", 13, "bold")
+        FONT    = ("Segoe UI", 10)
+        FONT_B  = ("Segoe UI", 10, "bold")
+        FONT_S  = ("Segoe UI", 9)
+        FONT_L  = ("Segoe UI", 14, "bold")
 
         # ═══ Заголовок ═══
-        header = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.GROOVE)
+        header = tk.Frame(root, bg=BG_PANEL, height=56)
         header.pack(fill=tk.X, padx=10, pady=(10, 5))
+        header.pack_propagate(False)
 
-        title_frame = tk.Frame(header, bg=BG_PANEL)
-        title_frame.pack(fill=tk.X, padx=12, pady=8)
+        tk.Label(header, text="Short Polling VPN",
+                 font=FONT_L, bg=BG_PANEL, fg=FG_TEXT).pack(side=tk.LEFT, padx=14)
 
-        tk.Label(title_frame, text="SHORT POLLING VPN",
-                 font=RETRO_L, bg=BG_PANEL, fg=FG_TEXT).pack(side=tk.LEFT)
-
-        self.status_frame = tk.Frame(title_frame, bg=BG_PANEL)
-        self.status_frame.pack(side=tk.RIGHT)
+        self.status_frame = tk.Frame(header, bg=BG_PANEL)
+        self.status_frame.pack(side=tk.RIGHT, padx=14)
 
         self.status_dot = tk.Canvas(self.status_frame, width=12, height=12,
                                      bg=BG_PANEL, highlightthickness=0)
-        self.status_dot.pack(side=tk.LEFT, padx=(0, 4))
+        self.status_dot.pack(side=tk.LEFT, padx=(0, 6))
         self._dot_id = self.status_dot.create_oval(1, 1, 11, 11, fill=FG_RED, outline="")
 
         self.status_label = tk.Label(self.status_frame, text="OFFLINE",
-                                      font=RETRO_B, bg=BG_PANEL, fg=FG_RED)
+                                      font=FONT_B, bg=BG_PANEL, fg=FG_RED)
         self.status_label.pack(side=tk.LEFT)
 
-        # ═══ Секция "SERVERS" ═══
-        section1 = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.GROOVE)
+        # ═══ Серверы ═══
+        section1 = tk.Frame(root, bg=BG_PANEL)
         section1.pack(fill=tk.X, padx=10, pady=5)
 
-        tk.Label(section1, text="+ SERVERS +", font=RETRO_B,
-                 bg=BG_PANEL, fg=FG_LABEL).pack(anchor=tk.W, padx=12, pady=(8, 4))
+        tk.Label(section1, text="Servers", font=FONT_B,
+                 bg=BG_PANEL, fg=FG_LABEL).pack(anchor=tk.W, padx=14, pady=(10, 4))
 
         for url in self.server_urls[:3]:
             row = tk.Frame(section1, bg=BG_PANEL)
-            row.pack(fill=tk.X, padx=12, pady=1)
-            tk.Label(row, text="*", font=RETRO, bg=BG_PANEL, fg=FG_VALUE).pack(side=tk.LEFT, padx=(0, 6))
-            tk.Label(row, text=url, font=RETRO, bg=BG_PANEL, fg=FG_BLUE,
+            row.pack(fill=tk.X, padx=14, pady=2)
+            tk.Label(row, text="\u25cf", font=("Segoe UI", 6), bg=BG_PANEL, fg=FG_GREEN).pack(side=tk.LEFT, padx=(0, 8))
+            tk.Label(row, text=url, font=("Consolas", 10), bg=BG_PANEL, fg=FG_BLUE,
                      anchor=tk.W).pack(side=tk.LEFT, fill=tk.X)
 
-        tk.Frame(section1, bg=BG_PANEL, height=4).pack()
+        tk.Frame(section1, bg=BG_PANEL, height=8).pack()
 
-        # ═══ Секция "CONNECTION" ═══
-        section2 = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.GROOVE)
+        # ═══ Настройки ═══
+        section2 = tk.Frame(root, bg=BG_PANEL)
         section2.pack(fill=tk.X, padx=10, pady=5)
 
-        tk.Label(section2, text="+ CONNECTION +", font=RETRO_B,
-                 bg=BG_PANEL, fg=FG_LABEL).pack(anchor=tk.W, padx=12, pady=(8, 4))
+        tk.Label(section2, text="Connection", font=FONT_B,
+                 bg=BG_PANEL, fg=FG_LABEL).pack(anchor=tk.W, padx=14, pady=(10, 4))
 
         info_grid = tk.Frame(section2, bg=BG_PANEL)
-        info_grid.pack(fill=tk.X, padx=12, pady=(0, 8))
+        info_grid.pack(fill=tk.X, padx=14, pady=(0, 10))
 
         self._info_labels = {}
         info_items = [
             ("SOCKS5:", f"{self._display_host()}:{self.socks_port}"),
             ("HTTP:", f"{self._display_host()}:{self.http_port}"),
-            ("POLL:", f"{self.cfg['client'].get('poll_interval_ms', 200)} ms"),
-            ("METHOD:", self.cfg["client"].get("poll_method", "POST")),
-            ("DATA:", self.cfg["client"].get("poll_data_in", "body")),
+            ("Poll:", f"{self.cfg['client'].get('poll_interval_ms', 200)} ms"),
+            ("Method:", self.cfg["client"].get("poll_method", "POST")),
+            ("Data:", self.cfg["client"].get("poll_data_in", "body")),
             ("TLS:", "ON" if self.cfg["client"].get("verify_tls", True) else "OFF"),
         ]
         for i, (k, v) in enumerate(info_items):
-            tk.Label(info_grid, text=k, font=RETRO_B, bg=BG_PANEL,
-                     fg=FG_LABEL, anchor=tk.W).grid(row=i, column=0, sticky=tk.W, pady=1)
-            lbl = tk.Label(info_grid, text=v, font=RETRO, bg=BG_PANEL,
-                     fg=FG_VALUE, anchor=tk.W)
-            lbl.grid(row=i, column=1, sticky=tk.W, padx=(8, 0), pady=1)
+            tk.Label(info_grid, text=k, font=FONT, bg=BG_PANEL,
+                     fg=FG_LABEL, anchor=tk.W).grid(row=i, column=0, sticky=tk.W, pady=2)
+            lbl = tk.Label(info_grid, text=v, font=("Consolas", 10), bg=BG_PANEL,
+                     fg=FG_GREEN, anchor=tk.W)
+            lbl.grid(row=i, column=1, sticky=tk.W, padx=(12, 0), pady=2)
             self._info_labels[k] = lbl
 
         info_grid.columnconfigure(1, weight=1)
 
-        # ═══ Кнопка Connect ═══
+        # ═══ Кнопка ═══
         btn_frame = tk.Frame(root, bg=BG_MAIN)
         btn_frame.pack(fill=tk.X, padx=10, pady=10)
 
         self.start_btn = tk.Button(
-            btn_frame, text=">> CONNECT <<", font=RETRO_L,
+            btn_frame, text="Connect", font=FONT_L,
             bg=BTN_ON, fg="white", activebackground=BTN_HOVER_ON,
-            activeforeground="white", relief=tk.RAISED, cursor="hand2",
-            bd=2, command=self._on_toggle
+            activeforeground="white", relief=tk.FLAT, cursor="hand2",
+            bd=0, command=self._on_toggle
         )
-        self.start_btn.pack(fill=tk.X, ipady=3)
+        self.start_btn.pack(fill=tk.X, ipady=4)
 
         self.start_btn.bind("<Enter>", self._on_btn_hover_enter)
         self.start_btn.bind("<Leave>", self._on_btn_hover_leave)
 
-        # ═══ Статус-строка ═══
-        self.info_bar = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.GROOVE, height=28)
+        # ═══ Статус ═══
+        self.info_bar = tk.Frame(root, bg=BG_PANEL, height=32)
         self.info_bar.pack(fill=tk.X, padx=10, pady=(0, 5))
         self.info_bar.pack_propagate(False)
 
-        self.info_label = tk.Label(self.info_bar, text="> Ready. Press CONNECT to start.",
-                                    font=RETRO_S, bg=BG_PANEL, fg=FG_LABEL)
-        self.info_label.pack(side=tk.LEFT, padx=10, pady=2)
+        self.info_label = tk.Label(self.info_bar, text="Press Connect to start",
+                                    font=FONT_S, bg=BG_PANEL, fg=FG_LABEL)
+        self.info_label.pack(side=tk.LEFT, padx=14, pady=4)
 
         self.proxy_indicator = tk.Label(self.info_bar, text="",
-                                         font=RETRO_S, bg=BG_PANEL)
-        self.proxy_indicator.pack(side=tk.RIGHT, padx=10, pady=2)
+                                         font=FONT_S, bg=BG_PANEL)
+        self.proxy_indicator.pack(side=tk.RIGHT, padx=14, pady=4)
 
         # ═══ Лог ═══
-        log_frame = tk.Frame(root, bg=BG_MAIN, bd=1, relief=tk.GROOVE)
+        log_frame = tk.Frame(root, bg=BG_MAIN)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        tk.Label(log_frame, text="+ LOG +", font=RETRO_B,
-                 bg=BG_MAIN, fg=FG_LABEL, anchor=tk.W).pack(anchor=tk.W, padx=10, pady=(6, 2))
+        tk.Label(log_frame, text="Log", font=FONT_B,
+                 bg=BG_MAIN, fg=FG_LABEL, anchor=tk.W).pack(anchor=tk.W, padx=4, pady=(0, 4))
 
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, wrap=tk.WORD, font=("Courier New", 9),
+            log_frame, wrap=tk.WORD, font=("Consolas", 9),
             bg=BG_LOG, fg=FG_TEXT, insertbackground=FG_TEXT,
             selectbackground=FG_BLUE, selectforeground="white",
             relief=tk.FLAT, state="disabled", height=12,
             borderwidth=0
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+        self.log_text.pack(fill=tk.BOTH, expand=True)
 
         self.log_text.tag_config("INFO", foreground=FG_TEXT)
         self.log_text.tag_config("WARNING", foreground=FG_AMBER)
@@ -301,11 +298,11 @@ class VpnGui:
         self._tray_thread.start()
 
     def _create_tray_image(self):
-        """Создаёт ретро-иконку 16x16 для трея."""
+        """Создаёт иконку 16x16 для трея."""
         img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([1, 1, 14, 14], fill="#f5f0e1", outline="#2c2416")
-        draw.rectangle([4, 4, 11, 11], fill="#4a8c5c")
+        draw.rectangle([1, 1, 14, 14], fill="#252536", outline="#a6e3a1")
+        draw.rectangle([4, 4, 11, 11], fill="#a6e3a1")
         return img
 
     def _tray_show(self, icon=None, item=None):
@@ -359,7 +356,7 @@ class VpnGui:
             self._log(f"Failed to reload config: {e}", "WARNING")
 
         self.running = True
-        self.start_btn.configure(text=">> DISCONNECT <<", bg=BTN_OFF, fg="white")
+        self.start_btn.configure(text="Disconnect", bg=BTN_OFF, fg="white")
         self._update_status(True)
         self.info_label.configure(text="Connecting...")
         self._log("VPN starting...", "INFO")
@@ -526,7 +523,7 @@ class VpnGui:
     def _stop(self):
         self.running = False
         self._stop_config_watcher()
-        self.start_btn.configure(text=">> CONNECT <<", bg=BTN_ON, fg="white")
+        self.start_btn.configure(text="Connect", bg=BTN_ON, fg="white")
         self._update_status(False)
         self.info_label.configure(text="Disconnected.")
         self._log("VPN stopping...", "INFO")
