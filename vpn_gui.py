@@ -23,6 +23,8 @@ from tkinter import ttk, scrolledtext, messagebox
 import time
 
 import yaml
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 # ── Импорт движка из общих модулей ──
 from tunnel import ClientTunnel
@@ -92,6 +94,29 @@ class TkLogHandler(logging.Handler):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Watchdog handler для отслеживания изменений config.yaml
+# ══════════════════════════════════════════════════════════════════════
+
+class ConfigFileHandler(FileSystemEventHandler):
+    """Срабатывает при изменении config.yaml — вызывает callback в main thread."""
+
+    def __init__(self, config_path: str, callback):
+        super().__init__()
+        self._config_path = os.path.abspath(config_path)
+        self._callback = callback
+        self._last_event = 0
+
+    def on_modified(self, event):
+        if os.path.abspath(event.src_path) == self._config_path:
+            now = time.time()
+            # Дебаунс: игнорируем повторные события за 1с
+            if now - self._last_event > 1.0:
+                self._last_event = now
+                # Вызываем callback в main thread (tkinter)
+                self._callback()
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  Главное окно
 # ══════════════════════════════════════════════════════════════════════
 
@@ -104,6 +129,7 @@ class VpnGui:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._tunnel: ClientTunnel | None = None
+        self._observer: Observer | None = None
 
         client_cfg = cfg["client"]
         socks_cfg = client_cfg.get("socks5", {})
@@ -303,7 +329,7 @@ class VpnGui:
         # Проверяем запуск через 1.5с, затем периодически
         self.root.after(1500, self._check_started)
         self._schedule_proxy_guard()
-        self._schedule_config_reload()
+        self._start_config_watcher()
 
     def _schedule_proxy_guard(self):
         """Каждые 3с проверяем, не сбросил ли кто-то прокси, и восстанавливаем."""
@@ -328,34 +354,44 @@ class VpnGui:
                 pass
         self.root.after(3000, self._schedule_proxy_guard)
 
-    def _schedule_config_reload(self):
-        """Каждые 5с проверяем, не изменился ли config.yaml, и применяем."""
-        if not self.running:
-            return
+    def _start_config_watcher(self):
+        """Запускает watchdog observer для отслеживания изменений config.yaml."""
+        self._stop_config_watcher()
+        handler = ConfigFileHandler(self.config_path, self._on_config_changed)
+        self._observer = Observer()
+        self._observer.schedule(handler, path=os.path.dirname(os.path.abspath(self.config_path)), recursive=False)
+        self._observer.start()
+
+    def _stop_config_watcher(self):
+        """Останавливает watchdog observer."""
+        if self._observer and self._observer.is_alive():
+            self._observer.stop()
+            self._observer.join(timeout=2)
+        self._observer = None
+
+    def _on_config_changed(self):
+        """Вызывается watchdog'ом в main thread при изменении config.yaml."""
         try:
             mtime = os.path.getmtime(self.config_path)
-            if mtime > self._config_mtime:
-                self._config_mtime = mtime
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    new_cfg = yaml.safe_load(f)
-                if new_cfg:
-                    self.cfg = new_cfg
-                    # Обновляем logging level
-                    level_name = new_cfg.get("logging", {}).get("level", "INFO")
-                    level = getattr(logging, level_name.upper(), logging.INFO)
-                    logging.getLogger().setLevel(level)
-                    # Обновляем tunnel
-                    if self._tunnel:
-                        self._tunnel.apply_config(new_cfg)
-                    # Обновляем отображение серверов
-                    client_cfg = new_cfg.get("client", {})
-                    urls = client_cfg.get("server_urls") or [client_cfg.get("server_url", "")]
-                    self.server_urls = [u.rstrip("/") for u in urls if u]
-                    self._update_server_display()
-                    self._log("Config reloaded", "INFO")
+            if mtime <= self._config_mtime:
+                return
+            self._config_mtime = mtime
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                new_cfg = yaml.safe_load(f)
+            if new_cfg:
+                self.cfg = new_cfg
+                level_name = new_cfg.get("logging", {}).get("level", "INFO")
+                level = getattr(logging, level_name.upper(), logging.INFO)
+                logging.getLogger().setLevel(level)
+                if self._tunnel:
+                    self._tunnel.apply_config(new_cfg)
+                client_cfg = new_cfg.get("client", {})
+                urls = client_cfg.get("server_urls") or [client_cfg.get("server_url", "")]
+                self.server_urls = [u.rstrip("/") for u in urls if u]
+                self._update_server_display()
+                self._log("Config reloaded", "INFO")
         except Exception as e:
             self._log(f"Config reload error: {e}", "WARNING")
-        self.root.after(5000, self._schedule_config_reload)
 
     def _update_server_display(self):
         """Обновляет отображение настроек в интерфейсе."""
@@ -447,6 +483,7 @@ class VpnGui:
 
     def _stop(self):
         self.running = False
+        self._stop_config_watcher()
         self.start_btn.configure(text="▶  CONNECT", bg=BTN_START)
         self._update_status(False)
         self.info_label.configure(text="Disconnected.")
@@ -582,6 +619,7 @@ class VpnGui:
         self.root.mainloop()
 
     def _on_close(self):
+        self._stop_config_watcher()
         if self.running:
             self._stop()
         self.root.destroy()
