@@ -35,24 +35,24 @@ from desktop_client import handle_http_client, set_system_proxy_windows
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Цветовая палитра — CRT Retro
+#  Цветовая палитра — Light Retro (Apple/IBM PC стиль)
 # ══════════════════════════════════════════════════════════════════════
 
-BG_CRT      = "#0a0a0a"
-BG_PANEL    = "#0d1a0d"
-BG_LOG      = "#050a05"
-FG_GREEN    = "#33ff33"
-FG_DIM      = "#1a8c1a"
-FG_AMBER    = "#ffb000"
-FG_RED      = "#ff3333"
-FG_CYAN     = "#33ffff"
-BORDER      = "#1a8c1a"
-BORDER_DIM  = "#0d4d0d"
-BTN_ON      = "#0d4d0d"
-BTN_OFF     = "#4d0d0d"
-BTN_HOVER_ON = "#1a8c1a"
-BTN_HOVER_OFF = "#8c1a1a"
-GLOW        = "#1a5c1a"
+BG_MAIN     = "#f5f0e1"
+BG_PANEL    = "#ebe5d0"
+BG_LOG      = "#faf8f0"
+FG_TEXT     = "#2c2416"
+FG_LABEL    = "#5a4a32"
+FG_VALUE    = "#1a6b3c"
+FG_BLUE     = "#2a5298"
+FG_RED      = "#b83232"
+FG_AMBER    = "#8b6914"
+BORDER      = "#c4b89a"
+BORDER_DARK = "#a09070"
+BTN_ON      = "#4a8c5c"
+BTN_OFF     = "#a85454"
+BTN_HOVER_ON = "#3a7a4c"
+BTN_HOVER_OFF = "#984444"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -141,10 +141,10 @@ class VpnGui:
 
         # ── Tk root ──
         self.root = tk.Tk()
-        self.root.title("SHORT POLLING VPN v2.0")
+        self.root.title("Short Polling VPN v2.0")
         self.root.geometry("540x740")
         self.root.minsize(440, 620)
-        self.root.configure(bg=BG_CRT)
+        self.root.configure(bg=BG_MAIN)
         self.root.resizable(True, True)
 
         # Иконка (опционально)
@@ -161,22 +161,21 @@ class VpnGui:
 
     def _build_ui(self):
         root = self.root
-        CRT = ("Consolas", 10)
-        CRT_B = ("Consolas", 10, "bold")
-        CRT_S = ("Consolas", 9)
-        CRT_L = ("Consolas", 14, "bold")
+        RETRO   = ("Courier New", 10)
+        RETRO_B = ("Courier New", 10, "bold")
+        RETRO_S = ("Courier New", 9)
+        RETRO_L = ("Courier New", 13, "bold")
 
         # ═══ Заголовок ═══
-        header = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.SUNKEN)
-        header.pack(fill=tk.X, padx=8, pady=(8, 4))
+        header = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.GROOVE)
+        header.pack(fill=tk.X, padx=10, pady=(10, 5))
 
         title_frame = tk.Frame(header, bg=BG_PANEL)
-        title_frame.pack(fill=tk.X, padx=10, pady=6)
+        title_frame.pack(fill=tk.X, padx=12, pady=8)
 
-        tk.Label(title_frame, text=">>> SHORT POLLING VPN <<<",
-                 font=CRT_L, bg=BG_PANEL, fg=FG_GREEN).pack(side=tk.LEFT)
+        tk.Label(title_frame, text="SHORT POLLING VPN",
+                 font=RETRO_L, bg=BG_PANEL, fg=FG_TEXT).pack(side=tk.LEFT)
 
-        # Статус-индикатор
         self.status_frame = tk.Frame(title_frame, bg=BG_PANEL)
         self.status_frame.pack(side=tk.RIGHT)
 
@@ -186,34 +185,34 @@ class VpnGui:
         self._dot_id = self.status_dot.create_oval(1, 1, 11, 11, fill=FG_RED, outline="")
 
         self.status_label = tk.Label(self.status_frame, text="OFFLINE",
-                                      font=CRT_B, bg=BG_PANEL, fg=FG_RED)
+                                      font=RETRO_B, bg=BG_PANEL, fg=FG_RED)
         self.status_label.pack(side=tk.LEFT)
 
         # ═══ Секция "SERVERS" ═══
-        section1 = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.SUNKEN)
-        section1.pack(fill=tk.X, padx=8, pady=4)
+        section1 = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.GROOVE)
+        section1.pack(fill=tk.X, padx=10, pady=5)
 
-        tk.Label(section1, text="╔══ SERVERS ══╗", font=CRT_B,
-                 bg=BG_PANEL, fg=FG_GREEN).pack(anchor=tk.W, padx=10, pady=(6, 2))
+        tk.Label(section1, text="+ SERVERS +", font=RETRO_B,
+                 bg=BG_PANEL, fg=FG_LABEL).pack(anchor=tk.W, padx=12, pady=(8, 4))
 
         for url in self.server_urls[:3]:
             row = tk.Frame(section1, bg=BG_PANEL)
-            row.pack(fill=tk.X, padx=10, pady=1)
-            tk.Label(row, text=">", font=CRT, bg=BG_PANEL, fg=FG_GREEN).pack(side=tk.LEFT, padx=(0, 4))
-            tk.Label(row, text=url, font=CRT, bg=BG_PANEL, fg=FG_CYAN,
+            row.pack(fill=tk.X, padx=12, pady=1)
+            tk.Label(row, text="*", font=RETRO, bg=BG_PANEL, fg=FG_VALUE).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Label(row, text=url, font=RETRO, bg=BG_PANEL, fg=FG_BLUE,
                      anchor=tk.W).pack(side=tk.LEFT, fill=tk.X)
 
         tk.Frame(section1, bg=BG_PANEL, height=4).pack()
 
         # ═══ Секция "CONNECTION" ═══
-        section2 = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.SUNKEN)
-        section2.pack(fill=tk.X, padx=8, pady=4)
+        section2 = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.GROOVE)
+        section2.pack(fill=tk.X, padx=10, pady=5)
 
-        tk.Label(section2, text="╔══ CONNECTION ══╗", font=CRT_B,
-                 bg=BG_PANEL, fg=FG_GREEN).pack(anchor=tk.W, padx=10, pady=(6, 2))
+        tk.Label(section2, text="+ CONNECTION +", font=RETRO_B,
+                 bg=BG_PANEL, fg=FG_LABEL).pack(anchor=tk.W, padx=12, pady=(8, 4))
 
         info_grid = tk.Frame(section2, bg=BG_PANEL)
-        info_grid.pack(fill=tk.X, padx=10, pady=(0, 6))
+        info_grid.pack(fill=tk.X, padx=12, pady=(0, 8))
 
         self._info_labels = {}
         info_items = [
@@ -225,63 +224,63 @@ class VpnGui:
             ("TLS:", "ON" if self.cfg["client"].get("verify_tls", True) else "OFF"),
         ]
         for i, (k, v) in enumerate(info_items):
-            tk.Label(info_grid, text=k, font=CRT_B, bg=BG_PANEL,
-                     fg=FG_GREEN, anchor=tk.W).grid(row=i, column=0, sticky=tk.W, pady=1)
-            lbl = tk.Label(info_grid, text=v, font=CRT, bg=BG_PANEL,
-                     fg=FG_AMBER, anchor=tk.W)
+            tk.Label(info_grid, text=k, font=RETRO_B, bg=BG_PANEL,
+                     fg=FG_LABEL, anchor=tk.W).grid(row=i, column=0, sticky=tk.W, pady=1)
+            lbl = tk.Label(info_grid, text=v, font=RETRO, bg=BG_PANEL,
+                     fg=FG_VALUE, anchor=tk.W)
             lbl.grid(row=i, column=1, sticky=tk.W, padx=(8, 0), pady=1)
             self._info_labels[k] = lbl
 
         info_grid.columnconfigure(1, weight=1)
 
         # ═══ Кнопка Connect ═══
-        btn_frame = tk.Frame(root, bg=BG_CRT)
-        btn_frame.pack(fill=tk.X, padx=8, pady=8)
+        btn_frame = tk.Frame(root, bg=BG_MAIN)
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
 
         self.start_btn = tk.Button(
-            btn_frame, text="[ CONNECT ]", font=CRT_L,
-            bg=BTN_ON, fg=FG_GREEN, activebackground=BTN_HOVER_ON,
-            activeforeground=FG_GREEN, relief=tk.RAISED, cursor="hand2",
+            btn_frame, text=">> CONNECT <<", font=RETRO_L,
+            bg=BTN_ON, fg="white", activebackground=BTN_HOVER_ON,
+            activeforeground="white", relief=tk.RAISED, cursor="hand2",
             bd=2, command=self._on_toggle
         )
-        self.start_btn.pack(fill=tk.X, ipady=4)
+        self.start_btn.pack(fill=tk.X, ipady=3)
 
         self.start_btn.bind("<Enter>", self._on_btn_hover_enter)
         self.start_btn.bind("<Leave>", self._on_btn_hover_leave)
 
         # ═══ Статус-строка ═══
-        self.info_bar = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.SUNKEN, height=28)
-        self.info_bar.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self.info_bar = tk.Frame(root, bg=BG_PANEL, bd=1, relief=tk.GROOVE, height=28)
+        self.info_bar.pack(fill=tk.X, padx=10, pady=(0, 5))
         self.info_bar.pack_propagate(False)
 
         self.info_label = tk.Label(self.info_bar, text="> Ready. Press CONNECT to start.",
-                                    font=CRT_S, bg=BG_PANEL, fg=FG_DIM)
-        self.info_label.pack(side=tk.LEFT, padx=8, pady=2)
+                                    font=RETRO_S, bg=BG_PANEL, fg=FG_LABEL)
+        self.info_label.pack(side=tk.LEFT, padx=10, pady=2)
 
         self.proxy_indicator = tk.Label(self.info_bar, text="",
-                                         font=CRT_S, bg=BG_PANEL)
-        self.proxy_indicator.pack(side=tk.RIGHT, padx=8, pady=2)
+                                         font=RETRO_S, bg=BG_PANEL)
+        self.proxy_indicator.pack(side=tk.RIGHT, padx=10, pady=2)
 
         # ═══ Лог ═══
-        log_frame = tk.Frame(root, bg=BG_CRT, bd=1, relief=tk.SUNKEN)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        log_frame = tk.Frame(root, bg=BG_MAIN, bd=1, relief=tk.GROOVE)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        tk.Label(log_frame, text="╔══ LOG ══╗", font=CRT_B,
-                 bg=BG_CRT, fg=FG_GREEN, anchor=tk.W).pack(anchor=tk.W, padx=8, pady=(4, 2))
+        tk.Label(log_frame, text="+ LOG +", font=RETRO_B,
+                 bg=BG_MAIN, fg=FG_LABEL, anchor=tk.W).pack(anchor=tk.W, padx=10, pady=(6, 2))
 
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, wrap=tk.WORD, font=("Consolas", 9),
-            bg=BG_LOG, fg=FG_GREEN, insertbackground=FG_GREEN,
-            selectbackground=GLOW, selectforeground=FG_GREEN,
+            log_frame, wrap=tk.WORD, font=("Courier New", 9),
+            bg=BG_LOG, fg=FG_TEXT, insertbackground=FG_TEXT,
+            selectbackground=FG_BLUE, selectforeground="white",
             relief=tk.FLAT, state="disabled", height=12,
             borderwidth=0
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
-        self.log_text.tag_config("INFO", foreground=FG_GREEN)
+        self.log_text.tag_config("INFO", foreground=FG_TEXT)
         self.log_text.tag_config("WARNING", foreground=FG_AMBER)
         self.log_text.tag_config("ERROR", foreground=FG_RED)
-        self.log_text.tag_config("DEBUG", foreground=FG_DIM)
+        self.log_text.tag_config("DEBUG", foreground=FG_LABEL)
 
     def _display_host(self):
         if self.socks_host in ("0.0.0.0", ""):
@@ -302,11 +301,11 @@ class VpnGui:
         self._tray_thread.start()
 
     def _create_tray_image(self):
-        """Создаёт CRT-зелёную иконку 16x16 для трея."""
+        """Создаёт ретро-иконку 16x16 для трея."""
         img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([1, 1, 14, 14], fill="#0a0a0a", outline="#33ff33")
-        draw.rectangle([4, 4, 11, 11], fill="#33ff33")
+        draw.rectangle([1, 1, 14, 14], fill="#f5f0e1", outline="#2c2416")
+        draw.rectangle([4, 4, 11, 11], fill="#4a8c5c")
         return img
 
     def _tray_show(self, icon=None, item=None):
@@ -331,15 +330,15 @@ class VpnGui:
 
     def _on_btn_hover_enter(self, e):
         if self.running:
-            self.start_btn.configure(bg=BTN_HOVER_OFF, fg=FG_RED)
+            self.start_btn.configure(bg=BTN_HOVER_OFF)
         else:
-            self.start_btn.configure(bg=BTN_HOVER_ON, fg=FG_GREEN)
+            self.start_btn.configure(bg=BTN_HOVER_ON)
 
     def _on_btn_hover_leave(self, e):
         if self.running:
-            self.start_btn.configure(bg=BTN_OFF, fg=FG_RED)
+            self.start_btn.configure(bg=BTN_OFF)
         else:
-            self.start_btn.configure(bg=BTN_ON, fg=FG_GREEN)
+            self.start_btn.configure(bg=BTN_ON)
 
     # ── Запуск / Остановка ──
 
@@ -360,7 +359,7 @@ class VpnGui:
             self._log(f"Failed to reload config: {e}", "WARNING")
 
         self.running = True
-        self.start_btn.configure(text="[ DISCONNECT ]", bg=BTN_OFF, fg=FG_RED)
+        self.start_btn.configure(text=">> DISCONNECT <<", bg=BTN_OFF, fg="white")
         self._update_status(True)
         self.info_label.configure(text="Connecting...")
         self._log("VPN starting...", "INFO")
@@ -527,7 +526,7 @@ class VpnGui:
     def _stop(self):
         self.running = False
         self._stop_config_watcher()
-        self.start_btn.configure(text="[ CONNECT ]", bg=BTN_ON, fg=FG_GREEN)
+        self.start_btn.configure(text=">> CONNECT <<", bg=BTN_ON, fg="white")
         self._update_status(False)
         self.info_label.configure(text="Disconnected.")
         self._log("VPN stopping...", "INFO")
