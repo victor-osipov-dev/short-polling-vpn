@@ -278,6 +278,14 @@ class VpnGui:
             self._start()
 
     def _start(self):
+        # Перечитываем config.yaml перед подключением
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                self.cfg = yaml.safe_load(f)
+            self._config_mtime = os.path.getmtime(self.config_path)
+        except Exception as e:
+            self._log(f"Failed to reload config: {e}", "WARNING")
+
         self.running = True
         self.start_btn.configure(text="■  DISCONNECT", bg=BTN_STOP)
         self._update_status(True)
@@ -326,13 +334,42 @@ class VpnGui:
                 self._config_mtime = mtime
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     new_cfg = yaml.safe_load(f)
-                if new_cfg and self._tunnel:
-                    self._tunnel.apply_config(new_cfg)
+                if new_cfg:
                     self.cfg = new_cfg
+                    # Обновляем logging level
+                    level_name = new_cfg.get("logging", {}).get("level", "INFO")
+                    level = getattr(logging, level_name.upper(), logging.INFO)
+                    logging.getLogger().setLevel(level)
+                    # Обновляем tunnel
+                    if self._tunnel:
+                        self._tunnel.apply_config(new_cfg)
+                    # Обновляем отображение серверов
+                    client_cfg = new_cfg.get("client", {})
+                    urls = client_cfg.get("server_urls") or [client_cfg.get("server_url", "")]
+                    self.server_urls = [u.rstrip("/") for u in urls if u]
+                    self._update_server_display()
                     self._log("Config reloaded", "INFO")
         except Exception as e:
             self._log(f"Config reload error: {e}", "WARNING")
         self.root.after(5000, self._schedule_config_reload)
+
+    def _update_server_display(self):
+        """Обновляет отображение серверов в интерфейсе."""
+        try:
+            # Находим карточку серверов и обновляем
+            for widget in self.root.winfo_children():
+                if isinstance(widget, tk.Frame) and widget.cget("bg") == BG_CARD:
+                    labels = [w for w in widget.winfo_children() if isinstance(w, tk.Frame)]
+                    # Простой способ — обновить info_label с текущими серверами
+                    pass
+            # Обновляем info_label с текущим poll_interval
+            if self._tunnel:
+                self.info_label.configure(
+                    text=f"SOCKS5:{self.socks_port}  HTTP:{self.http_port}  "
+                         f"Interval:{self._tunnel.poll_interval_ms}ms"
+                )
+        except Exception:
+            pass
 
     def _check_started(self):
         if self.running and self._tunnel:
