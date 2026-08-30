@@ -96,8 +96,10 @@ class TkLogHandler(logging.Handler):
 # ══════════════════════════════════════════════════════════════════════
 
 class VpnGui:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, config_path: str = "config.yaml"):
         self.cfg = cfg
+        self.config_path = config_path
+        self._config_mtime = os.path.getmtime(config_path)
         self.running = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -289,6 +291,7 @@ class VpnGui:
         # Проверяем запуск через 1.5с, затем периодически
         self.root.after(1500, self._check_started)
         self._schedule_proxy_guard()
+        self._schedule_config_reload()
 
     def _schedule_proxy_guard(self):
         """Каждые 3с проверяем, не сбросил ли кто-то прокси, и восстанавливаем."""
@@ -312,6 +315,24 @@ class VpnGui:
             except Exception:
                 pass
         self.root.after(3000, self._schedule_proxy_guard)
+
+    def _schedule_config_reload(self):
+        """Каждые 5с проверяем, не изменился ли config.yaml, и применяем."""
+        if not self.running:
+            return
+        try:
+            mtime = os.path.getmtime(self.config_path)
+            if mtime > self._config_mtime:
+                self._config_mtime = mtime
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    new_cfg = yaml.safe_load(f)
+                if new_cfg and self._tunnel:
+                    self._tunnel.apply_config(new_cfg)
+                    self.cfg = new_cfg
+                    self._log("Config reloaded", "INFO")
+        except Exception as e:
+            self._log(f"Config reload error: {e}", "WARNING")
+        self.root.after(5000, self._schedule_config_reload)
 
     def _check_started(self):
         if self.running and self._tunnel:
@@ -539,7 +560,7 @@ def main():
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    app = VpnGui(cfg)
+    app = VpnGui(cfg, args.config)
     app.run()
 
 

@@ -114,6 +114,38 @@ class ClientTunnel:
 
         logger.info("client_id=%s", self.client_id.hex())
 
+    def apply_config(self, cfg: dict):
+        """Применяет новые настройки из config.yaml без перезапуска.
+
+        Обновляет параметры polling, server URLs, idle timeout и т.д.
+        Ключи шифрования (psk), порты и bind-адреса НЕ перезапускаются.
+        """
+        client_cfg = cfg["client"]
+
+        urls = client_cfg.get("server_urls") or [client_cfg.get("server_url", "")]
+        new_urls = [u.rstrip("/") for u in urls if u]
+        if new_urls != self.server_urls:
+            logger.info("Config reload: server_urls changed")
+            self.server_urls = new_urls
+            self.server_base = new_urls[0] if new_urls else self.server_base
+            self._url_failures.clear()
+            self._url_cooldown_until.clear()
+
+        self.server_selector = str(client_cfg.get("server_selector", "random")).lower()
+        self.url_fail_limit = max(1, int(client_cfg.get("url_fail_limit", 3)))
+        self.url_cooldown_seconds = max(1, int(client_cfg.get("url_cooldown_seconds", 60)))
+        self.poll_path = client_cfg.get("poll_path", "/poll")
+        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
+        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
+        self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
+        self.poll_method = client_cfg.get("poll_method", "POST").upper()
+        self.poll_data_in = client_cfg.get("poll_data_in", "body")
+        self.host_header = client_cfg.get("host_header") or None
+
+        idle_cfg = client_cfg.get("idle_timeout", {})
+        self.idle_timeout_enabled = idle_cfg.get("enabled", False)
+        self.idle_timeout_seconds = int(idle_cfg.get("seconds", 300))
+
     # ── Сессии ──
 
     async def register_session(self, writer: asyncio.StreamWriter, host: str, port: int) -> bytes:
