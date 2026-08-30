@@ -286,6 +286,7 @@ class VpnGui:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 self.cfg = yaml.safe_load(f)
             self._config_mtime = os.path.getmtime(self.config_path)
+            self._update_server_display()
         except Exception as e:
             self._log(f"Failed to reload config: {e}", "WARNING")
 
