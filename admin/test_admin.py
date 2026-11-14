@@ -70,6 +70,23 @@ class StoreTest(unittest.TestCase):
         self.assertNotEqual(old, new)
         self.assertEqual(self.store.get_secret(user.uuid), new)
 
+    def test_reads_do_not_hold_stale_transaction(self):
+        user, _ = self.store.create_user("Eve")
+        # Второй Store имитирует admin-панель, которая пишет в ту же БД.
+        other = Store(
+            os.path.join(self.tmp.name, "vpn.db"),
+            os.path.join(self.tmp.name, "cluster.key"),
+            node_id="other-master",
+        )
+        self.store.get_user(user.uuid)
+        self.store.list_users()
+        other.update_user(user.uuid, name="Eve-updated")
+        self.assertEqual(self.store.get_user(user.uuid).name, "Eve-updated")
+        ok, reason = self.store.register_device(user.uuid, "dev-1")
+        self.assertTrue(ok, reason)
+        self.assertFalse(self.store.conn.in_transaction)
+        other.close()
+
 
 class PanelTest(unittest.TestCase):
     def setUp(self):

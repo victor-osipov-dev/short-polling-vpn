@@ -260,7 +260,12 @@ class Store:
         self.lock = threading.RLock()
         parent = os.path.dirname(os.path.abspath(db_path))
         os.makedirs(parent, exist_ok=True)
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False,
+                                    isolation_level=None)
+        # isolation_level=None — autocommit. Иначе SELECT открывает
+        # долгоживущую read-транзакцию: vpn-server перестаёт видеть
+        # пользователей, созданных после старта, и получает
+        # "database is locked" на записи.
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=5000")
         with self.lock:
