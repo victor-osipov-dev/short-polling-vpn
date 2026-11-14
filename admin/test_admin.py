@@ -139,6 +139,18 @@ class PanelTest(unittest.TestCase):
         self.assertTrue(sub["split_routing"]["rules"]["geoip"].endswith("/rules/geoip-ru.txt"))
         self.assertEqual(self.get("/rules/geoip-ru.txt").read().decode().strip(), "5.255.255.0/24")
 
+        # Профили подписки: несколько профилей на одного пользователя.
+        profiles_html = self.get("/profiles").read().decode()
+        csrf_p = re.search(r'name="csrf" value="([^"]+)"', profiles_html).group(1)
+        self.post("/profiles/new", {
+            "csrf": csrf_p, "name": "Relay profile", "mode": "proxy",
+            "split_enabled": "1", "route_ru": "RU exit",
+            "route_non_ru": "DE exit", "route_private": "direct",
+        })
+        sub = json.loads(self.get(f"/users/{uuid}/sub.json").read())
+        self.assertEqual(len(sub["client_profiles"]), 1)
+        self.assertEqual(sub["client_profiles"][0]["name"], "Relay profile")
+
         token = sub["subscription"]["url"].rsplit("/", 1)[-1]
         public_sub = json.loads(self.get(f"/sub/{token}").read())
         self.assertEqual(public_sub["user"]["uuid"], uuid)

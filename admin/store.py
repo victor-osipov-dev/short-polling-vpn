@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -91,6 +92,35 @@ class Device:
     last_ip: str
 
 
+@dataclass
+class ClientProfile:
+    id: str
+    name: str
+    mode: str
+    enabled: bool
+    split_enabled: bool
+    route_ru: str
+    route_non_ru: str
+    route_private: str
+    sort_order: int
+    created_at: int
+    updated_at: int
+    updated_by: str
+
+    def to_public(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "mode": self.mode,
+            "enabled": self.enabled,
+            "split_enabled": self.split_enabled,
+            "route_ru": self.route_ru,
+            "route_non_ru": self.route_non_ru,
+            "route_private": self.route_private,
+            "sort_order": self.sort_order,
+        }
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -135,6 +165,21 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     token TEXT NOT NULL UNIQUE,
     created_at INTEGER NOT NULL,
     revoked_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS client_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'proxy',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    split_enabled INTEGER NOT NULL DEFAULT 0,
+    route_ru TEXT NOT NULL DEFAULT '',
+    route_non_ru TEXT NOT NULL DEFAULT '',
+    route_private TEXT NOT NULL DEFAULT 'direct',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS tombstones (
@@ -462,6 +507,13 @@ class Store:
                         self._upsert_subscription(payload, entity_key)
                 else:
                     raise ValueError("bad subscription op")
+            elif entity == "profile":
+                if kind == "delete":
+                    self.conn.execute("DELETE FROM client_profiles WHERE id=?", (entity_key,))
+                elif kind == "upsert":
+                    self._upsert_client_profile(payload, entity_key)
+                else:
+                    raise ValueError("bad profile op")
             else:
                 raise ValueError("unknown entity")
             self._record_applied(op_id)
@@ -531,6 +583,34 @@ class Store:
             "created_at=excluded.created_at, revoked_at=excluded.revoked_at",
             (user_uuid, payload.get("token"), payload.get("created_at") or now_ms(),
              payload.get("revoked_at")),
+        )
+
+    def _upsert_client_profile(self, payload: dict, profile_id: str) -> None:
+        cols = ("id", "name", "mode", "enabled", "split_enabled", "route_ru",
+                "route_non_ru", "route_private", "sort_order", "created_at",
+                "updated_at", "updated_by")
+        values = []
+        for col in cols:
+            value = payload.get(col)
+            if col == "id":
+                value = profile_id
+            elif col in ("enabled", "split_enabled"):
+                value = 1 if value else 0
+            elif col in ("sort_order",):
+                value = int(value or 0)
+            elif col in ("created_at", "updated_at"):
+                value = int(value or now_ms())
+            elif col == "route_private" and not value:
+                value = "direct"
+            elif col == "mode" and not value:
+                value = "proxy"
+            values.append(value)
+        placeholders = ",".join("?" for _ in cols)
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+        self.conn.execute(
+            f"INSERT INTO client_profiles({','.join(cols)}) VALUES({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}",
+            values,
         )
 
     # ── users ────────────────────────────────────────────────────────
@@ -775,6 +855,104 @@ class Store:
                 (token,),
             ).fetchone()
         return self._row_to_user(row) if row else None
+
+    # ── client profiles ──────────────────────────────────────────────
+
+    @staticmethod
+    def _row_to_client_profile(row: sqlite3.Row) -> ClientProfile:
+        return ClientProfile(
+            id=row["id"],
+            name=row["name"],
+            mode=row["mode"],
+            enabled=bool(row["enabled"]),
+            split_enabled=bool(row["split_enabled"]),
+            route_ru=row["route_ru"],
+            route_non_ru=row["route_non_ru"],
+            route_private=row["route_private"],
+            sort_order=row["sort_order"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            updated_by=row["updated_by"],
+        )
+
+    def list_client_profiles(self) -> list[ClientProfile]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM client_profiles ORDER BY sort_order, created_at"
+            ).fetchall()
+        return [self._row_to_client_profile(r) for r in rows]
+
+    def get_client_profile(self, profile_id: str) -> Optional[ClientProfile]:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM client_profiles WHERE id=?", (profile_id,)
+            ).fetchone()
+        return self._row_to_client_profile(row) if row else None
+
+    def create_client_profile(self, name: str, mode: str = "proxy",
+                              split_enabled: bool = False,
+                              route_ru: str = "", route_non_ru: str = "",
+                              route_private: str = "direct",
+                              sort_order: Optional[int] = None,
+                              actor: str = "admin") -> ClientProfile:
+        profile_id = str(uuidlib.uuid4())
+        ts = now_ms()
+        if sort_order is None:
+            with self.lock:
+                row = self.conn.execute(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM client_profiles"
+                ).fetchone()
+            sort_order = int(row["n"])
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO client_profiles(id,name,mode,enabled,split_enabled,"
+                "route_ru,route_non_ru,route_private,sort_order,created_at,updated_at,"
+                "updated_by) VALUES(?,?,?,1,?,?,?,?,?,?,?,?)",
+                (profile_id, name, mode, 1 if split_enabled else 0, route_ru,
+                 route_non_ru, route_private, sort_order, ts, ts, self.node_id),
+            )
+            self.conn.commit()
+        self._log_op("profile", profile_id, "upsert", self._client_profile_payload(profile_id))
+        self.audit(actor, "create_profile", profile_id, name)
+        return self.get_client_profile(profile_id)
+
+    def update_client_profile(self, profile_id: str, **fields) -> Optional[ClientProfile]:
+        allowed = {"name", "mode", "enabled", "split_enabled", "route_ru",
+                   "route_non_ru", "route_private", "sort_order"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return self.get_client_profile(profile_id)
+        sets, values = [], []
+        for key, value in updates.items():
+            if key in ("enabled", "split_enabled"):
+                value = 1 if value else 0
+            sets.append(f"{key}=?")
+            values.append(value)
+        sets.append("updated_at=?")
+        values.append(self.next_hlc())
+        sets.append("updated_by=?")
+        values.append(self.node_id)
+        values.append(profile_id)
+        with self.lock:
+            self.conn.execute(
+                f"UPDATE client_profiles SET {', '.join(sets)} WHERE id=?", values
+            )
+            self.conn.commit()
+        self._log_op("profile", profile_id, "upsert", self._client_profile_payload(profile_id))
+        return self.get_client_profile(profile_id)
+
+    def delete_client_profile(self, profile_id: str, actor: str = "admin") -> bool:
+        with self.lock:
+            cur = self.conn.execute("DELETE FROM client_profiles WHERE id=?", (profile_id,))
+            self.conn.commit()
+        if cur.rowcount:
+            self._log_op("profile", profile_id, "delete", {})
+            self.audit(actor, "delete_profile", profile_id)
+        return cur.rowcount > 0
+
+    def _client_profile_payload(self, profile_id: str) -> dict:
+        profile = self.get_client_profile(profile_id)
+        return profile.to_public() if profile else {}
 
     # ── audit read ───────────────────────────────────────────────────
 

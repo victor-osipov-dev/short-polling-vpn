@@ -248,6 +248,7 @@ class Panel:
             },
             "nodes": nodes,
             "profiles": sub_cfg.get("profiles", []) or [],
+            "client_profiles": [p.to_public() for p in self.store.list_client_profiles() if p.enabled],
             "split_routing": split,
         }
         return payload
@@ -419,6 +420,7 @@ class Handler(BaseHTTPRequestHandler):
         if not sess:
             return ""
         return ('<a href="/users">Пользователи</a>'
+                '<a href="/profiles">Профили</a>'
                 '<a href="/nodes">Узлы</a>'
                 '<a href="/audit">Аудит</a>'
                 '<a href="/logout">Выйти</a>')
@@ -457,6 +459,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.user_form_page(sess)
             if path == "/nodes":
                 return self.nodes_page(sess)
+            if path == "/profiles":
+                return self.profiles_page(sess)
             if path == "/audit":
                 return self.audit_page(sess)
             m = re.fullmatch(r"/users/([0-9a-fA-F-]{36})", path)
@@ -495,6 +499,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/users/new":
                 return self.create_user(form, sess)
+            if path == "/profiles/new":
+                return self.create_profile(form, sess)
+            m = re.fullmatch(r"/profiles/([0-9a-fA-F-]{36})/(update|delete)", path)
+            if m:
+                return self.profile_action(m.group(1), m.group(2), form, sess)
             m = re.fullmatch(r"/users/([0-9a-fA-F-]{36})/(enable|disable|delete|rotate|revoke-sub)", path)
             if m:
                 return self.user_action(m.group(1), m.group(2), sess)
@@ -689,6 +698,99 @@ class Handler(BaseHTTPRequestHandler):
             store.revoke_subscription(user_uuid)
             return self.redirect(f"/users/{user_uuid}")
         return self.redirect("/users")
+
+    def profiles_page(self, sess: dict):
+        profiles = self.panel.store.list_client_profiles()
+        rows = []
+        for p in profiles:
+            rows.append(f"""
+<tr>
+<td><b>{esc(p.name)}</b><div class="muted">{esc(p.id)}</div></td>
+<td>{esc(p.mode)}</td>
+<td>{'ON' if p.split_enabled else 'off'}</td>
+<td>{esc(p.route_ru) or '—'} / {esc(p.route_non_ru) or '—'} / {esc(p.route_private) or 'direct'}</td>
+<td>
+<form method="post" action="/profiles/{esc(p.id)}/update" style="display:inline">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<input type="hidden" name="name" value="{esc(p.name)}">
+<input type="hidden" name="mode" value="{esc(p.mode)}">
+<input type="hidden" name="enabled" value="{0 if p.enabled else 1}">
+<input type="hidden" name="split_enabled" value="{0 if p.split_enabled else 1}">
+<input type="hidden" name="route_ru" value="{esc(p.route_ru)}">
+<input type="hidden" name="route_non_ru" value="{esc(p.route_non_ru)}">
+<input type="hidden" name="route_private" value="{esc(p.route_private)}">
+<button class="secondary" type="submit">{'Disable' if p.enabled else 'Enable'}</button>
+</form>
+<form method="post" action="/profiles/{esc(p.id)}/delete" style="display:inline"
+ onsubmit="return confirm('Удалить профиль?')">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<button class="danger" type="submit">Delete</button>
+</form>
+</td>
+</tr>""")
+        body = f"""
+<div class="card">
+<h2 style="margin-top:0">Новый профиль</h2>
+<form method="post" action="/profiles/new">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<div class="row">
+<div style="flex:1"><label>Название</label><input name="name" required></div>
+<div><label>Режим</label>
+<select name="mode"><option value="proxy">proxy</option><option value="vpn">vpn</option></select></div>
+</div>
+<div class="row">
+<div style="flex:1"><label>RU маршрут</label><input name="route_ru" placeholder="RU exit"></div>
+<div style="flex:1"><label>non-RU маршрут</label><input name="route_non_ru" placeholder="DE exit"></div>
+<div style="flex:1"><label>Private</label><input name="route_private" value="direct"></div>
+</div>
+<label><input type="checkbox" name="split_enabled" value="1" style="width:auto"> Split routing</label>
+<div style="margin-top:12px"><button type="submit">Создать профиль</button></div>
+</form>
+</div>
+<div class="card">
+<h2 style="margin-top:0">Профили подписки</h2>
+<table><tr><th>Профиль</th><th>Режим</th><th>Split</th><th>RU / non-RU / private</th><th></th></tr>
+{''.join(rows) or '<tr><td colspan="5" class="muted">Профилей пока нет</td></tr>'}
+</table>
+<p class="muted">Все активные профили попадают в подписку (`client_profiles`) и создаются в приложении отдельными профилями.</p>
+</div>"""
+        self.send_html(page("Профили", body, self.nav(sess)))
+
+    def create_profile(self, form: dict, sess: dict):
+        name = (form.get("name") or "").strip()
+        if not name:
+            return self.send_html(page("Ошибка", "<p class='error'>Название обязательно</p>",
+                                        self.nav(sess)), 400)
+        self.panel.store.create_client_profile(
+            name=name,
+            mode=(form.get("mode") or "proxy").strip(),
+            split_enabled=form.get("split_enabled") == "1",
+            route_ru=(form.get("route_ru") or "").strip(),
+            route_non_ru=(form.get("route_non_ru") or "").strip(),
+            route_private=(form.get("route_private") or "direct").strip() or "direct",
+            actor=self.panel.username,
+        )
+        self.redirect("/profiles")
+
+    def profile_action(self, profile_id: str, action: str, form: dict, sess: dict):
+        store = self.panel.store
+        if action == "delete":
+            store.delete_client_profile(profile_id, self.panel.username)
+        else:
+            profile = store.get_client_profile(profile_id)
+            if profile:
+                store.update_client_profile(
+                    profile_id,
+                    name=(form.get("name") or profile.name).strip(),
+                    mode=(form.get("mode") or profile.mode).strip(),
+                    enabled=(form.get("enabled") or ("0" if profile.enabled else "1")) == "1",
+                    split_enabled=(form.get("split_enabled") or
+                                   ("0" if profile.split_enabled else "1")) == "1",
+                    route_ru=(form.get("route_ru") or profile.route_ru).strip(),
+                    route_non_ru=(form.get("route_non_ru") or profile.route_non_ru).strip(),
+                    route_private=(form.get("route_private") or profile.route_private).strip(),
+                )
+        self.redirect("/profiles")
 
     def nodes_page(self, sess: dict):
         sub = self.panel.cfg.get("subscription") or {}

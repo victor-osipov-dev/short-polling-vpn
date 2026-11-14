@@ -321,6 +321,7 @@ class ConfigManager(private val context: Context) {
             nodes.optJSONObject(i)?.optString("url")?.trim()?.takeIf { it.isNotEmpty() }
         }
         val profilesArr = sub.optJSONArray("profiles") ?: JSONArray()
+        val clientProfilesArr = sub.optJSONArray("client_profiles") ?: JSONArray()
         val routeNames = mutableListOf<String>()
         for (i in 0 until profilesArr.length()) {
             val routes = profilesArr.optJSONObject(i)?.optJSONArray("routes") ?: continue
@@ -347,6 +348,52 @@ class ConfigManager(private val context: Context) {
         }
         val base = existing?.config ?: getActiveProfile()?.config ?: ProxyConfig()
         val deviceId = base.deviceId.ifBlank { UUID.randomUUID().toString() }
+
+        // client_profiles: несколько профилей в одной подписке.
+        if (clientProfilesArr.length() > 0) {
+            val imported = mutableListOf<VpnProfile>()
+            for (i in 0 until clientProfilesArr.length()) {
+                val cp = clientProfilesArr.optJSONObject(i) ?: continue
+                if (!cp.optBoolean("enabled", true)) continue
+                val cpId = cp.optString("id", "").ifBlank { UUID.randomUUID().toString() }
+                val cpName = cp.optString("name", "").ifBlank { "Profile ${i + 1}" }
+                val cpMode = cp.optString("mode", "proxy")
+                val splitEnabled = cp.optBoolean("split_enabled", false)
+                val routeRu = cp.optString("route_ru", "")
+                val routeNonRu = cp.optString("route_non_ru", "")
+                val routePrivate = cp.optString("route_private", "direct").ifBlank { "direct" }
+                val updated = base.copy(
+                    subscriptionUrl = url,
+                    subscriptionFile = "",
+                    subscriptionName = display,
+                    userId = uuid.ifBlank { base.userId },
+                    userSecret = secret.ifBlank { base.userSecret },
+                    deviceId = deviceId,
+                    serverUrl = nodeUrls.firstOrNull() ?: base.serverUrl,
+                    serverUrls = nodeUrls.ifEmpty { base.serverUrls },
+                    routingEnabled = splitEnabled,
+                    routingOptions = if (routeNames.isNotEmpty())
+                        routeNames.distinct().joinToString("|") else base.routingOptions,
+                    routeRu = routeRu.ifBlank { base.routeRu },
+                    routeNonRu = routeNonRu.ifBlank { base.routeNonRu },
+                    routePrivate = routePrivate
+                )
+                val localId = "sub:$cpId"
+                val existingProfile = loadProfiles().firstOrNull { it.id == localId }
+                val profile = VpnProfile(
+                    id = localId,
+                    name = cpName,
+                    mode = cpMode,
+                    config = updated,
+                    routing = existingProfile?.routing ?: RoutingConfig()
+                )
+                if (existingProfile != null) updateProfile(profile) else addProfile(profile)
+                imported.add(profile)
+            }
+            if (imported.isNotEmpty()) selectProfile(imported.first().id)
+            return imported.first()
+        }
+
         val updated = base.copy(
             subscriptionUrl = url,
             subscriptionFile = "",
