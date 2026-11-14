@@ -18,6 +18,9 @@ data class ProxyConfig(
     val pollMethod: String = "POST",
     val pollDataIn: String = "body",
     val hostHeader: String = "",
+    val urlFailLimit: Int = 3,
+    val urlCooldownSeconds: Int = 60,
+    val disabledUrls: List<String> = emptyList(),
     val socksBindHost: String = "0.0.0.0",
     val socksBindPort: Int = 8888,
     val psk: String = "vTvesbK6BIh+ZPJf6pn4b+s7F+RvMi9ulrkFlPfX2qo=",
@@ -28,6 +31,16 @@ data class ProxyConfig(
     val dnsBindHost: String = "127.0.0.1",
     val dnsBindPort: Int = 5353,
     val loggingLevel: String = "INFO",
+    val userId: String = "",
+    val userSecret: String = "",
+    val deviceId: String = "",
+    val subscriptionUrl: String = "",
+    val subscriptionFile: String = "",
+    val routingEnabled: Boolean = false,
+    val routeRu: String = "",
+    val routeNonRu: String = "",
+    val routePrivate: String = "direct",
+    val routingOptions: String = "",
 ) {
     fun effectiveServerUrls(): List<String> =
         if (serverUrls.isNotEmpty()) serverUrls else listOf(serverUrl)
@@ -35,6 +48,26 @@ data class ProxyConfig(
     fun toJson(): JSONObject {
         return JSONObject().apply {
             put("mode", "client")
+            if (subscriptionUrl.isNotBlank() || subscriptionFile.isNotBlank()) {
+                put("subscription", JSONObject().apply {
+                    put("url", subscriptionUrl)
+                    put("file", subscriptionFile)
+                })
+            }
+            if (userId.isNotBlank() || userSecret.isNotBlank() || deviceId.isNotBlank()) {
+                put("user", JSONObject().apply {
+                    put("uuid", userId)
+                    put("secret", userSecret)
+                    put("device_id", deviceId)
+                })
+            }
+            put("routing", JSONObject().apply {
+                put("enabled", routingEnabled)
+                put("ru", routeRu)
+                put("non_ru", routeNonRu)
+                put("private", routePrivate)
+            })
+            if (routingOptions.isNotBlank()) put("routing_options", routingOptions)
             put("client", JSONObject().apply {
                 put("socks5", JSONObject().apply {
                     put("bind_host", socksBindHost)
@@ -51,6 +84,11 @@ data class ProxyConfig(
                 put("poll_method", pollMethod)
                 put("poll_data_in", pollDataIn)
                 put("host_header", hostHeader)
+                put("url_fail_limit", urlFailLimit)
+                put("url_cooldown_seconds", urlCooldownSeconds)
+                put("disabled_urls", JSONArray().apply {
+                    disabledUrls.forEach { put(it) }
+                })
                 put("idle_timeout", JSONObject().apply {
                     put("enabled", idleTimeoutEnabled)
                     put("seconds", idleTimeoutSeconds)
@@ -76,6 +114,9 @@ data class ProxyConfig(
     companion object {
         fun fromJson(obj: JSONObject): ProxyConfig {
             val defaults = ProxyConfig()
+            val user = obj.optJSONObject("user") ?: JSONObject()
+            val subscription = obj.optJSONObject("subscription") ?: JSONObject()
+            val routing = obj.optJSONObject("routing") ?: JSONObject()
             val client = obj.optJSONObject("client") ?: JSONObject()
             val socks = client.optJSONObject("socks5") ?: JSONObject()
             val security = obj.optJSONObject("security") ?: JSONObject()
@@ -96,6 +137,11 @@ data class ProxyConfig(
                 pollMethod = client.optString("poll_method", defaults.pollMethod),
                 pollDataIn = client.optString("poll_data_in", defaults.pollDataIn),
                 hostHeader = client.optString("host_header", defaults.hostHeader),
+                urlFailLimit = client.optInt("url_fail_limit", defaults.urlFailLimit),
+                urlCooldownSeconds = client.optInt("url_cooldown_seconds", defaults.urlCooldownSeconds),
+                disabledUrls = (client.optJSONArray("disabled_urls") ?: JSONArray()).let { arr ->
+                    (0 until arr.length()).map { arr.getString(it).trim() }.filter { it.isNotEmpty() }
+                },
                 socksBindHost = socks.optString("bind_host", defaults.socksBindHost),
                 socksBindPort = socks.optInt("bind_port", defaults.socksBindPort),
                 psk = security.optString("psk", defaults.psk),
@@ -106,6 +152,16 @@ data class ProxyConfig(
                 dnsBindHost = dnsRelay.optString("bind_host", defaults.dnsBindHost),
                 dnsBindPort = dnsRelay.optInt("bind_port", defaults.dnsBindPort),
                 loggingLevel = logging.optString("level", defaults.loggingLevel),
+                userId = user.optString("uuid", defaults.userId),
+                userSecret = user.optString("secret", defaults.userSecret),
+                deviceId = user.optString("device_id", defaults.deviceId),
+                subscriptionUrl = subscription.optString("url", defaults.subscriptionUrl),
+                subscriptionFile = subscription.optString("file", defaults.subscriptionFile),
+                routingEnabled = routing.optBoolean("enabled", defaults.routingEnabled),
+                routeRu = routing.optString("ru", defaults.routeRu),
+                routeNonRu = routing.optString("non_ru", defaults.routeNonRu),
+                routePrivate = routing.optString("private", defaults.routePrivate),
+                routingOptions = obj.optString("routing_options", defaults.routingOptions),
             )
         }
     }
@@ -252,7 +308,16 @@ class ConfigManager(private val context: Context) {
 
     // ── Legacy API (Simple tab + service) ─────────────────────────────
 
-    fun load(): ProxyConfig = getActiveProfile().config
+    fun load(): ProxyConfig {
+        val active = getActiveProfile()
+        val cfg = active.config
+        if (cfg.deviceId.isBlank()) {
+            val updated = active.copy(config = cfg.copy(deviceId = UUID.randomUUID().toString()))
+            updateProfile(updated)
+            return updated.config
+        }
+        return cfg
+    }
 
     fun save(config: ProxyConfig) {
         val active = getActiveProfile()

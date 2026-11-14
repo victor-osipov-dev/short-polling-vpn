@@ -18,17 +18,25 @@ APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
 
 1. Install the APK on your Android device.
 2. Open the app.
-3. Configure the proxy:
-   - **Profiles tab**: create/rename/duplicate/delete named profiles. Each
+3. The home screen shows a big connect button and the list of profiles.
+   - Tap a profile card to make it active.
+   - Tap the big button to connect/disconnect.
+4. Tap the gear icon (top right) to open **Settings**:
+   - **Profiles**: create/rename/duplicate/delete named profiles. Each
      profile stores its operation mode (Proxy / VPN), connection settings
      and traffic routing rules. Tap **Set Active** to switch; apply by
-     Stop/Start.
-   - **Simple tab**: fill in individual fields (server URL, PSK, etc.)
+     reconnecting.
+   - **Connection**: fill in individual fields (server URL, PSK, etc.)
      for the active profile. Changes are saved automatically on every edit.
-   - **Config tab**: paste/edit the full JSON config (server block is
-     ignored, only client + security sections are used).
-4. Tap **Start**. The proxy runs as a foreground service (notification
-   in status bar).
+     Each URL has a checkbox — uncheck it to temporarily exclude that URL
+     from rotation (the choice is persisted). Below the list, **URL status**
+     shows whether each URL is active, disabled or quarantined, its current
+     error count, and a **Reset errors** button (available while connected).
+   - **Advanced**: paste/edit the full JSON config (server block is
+     ignored, only client + security sections are used), or set the URL
+     quarantine time and failure threshold with the numeric fields at the
+     top.
+   - **Logs**: live service log.
 5. In Proxy mode, configure your apps or browser to use SOCKS5 proxy at
    `127.0.0.1:8888`.
    - On a non-rooted device, apps must support SOCKS5 natively (e.g.,

@@ -1,0 +1,74 @@
+# Пример конфига панели. Скопируйте в admin/config.yaml.
+# Хеш пароля: python -m admin.panel --hash-password 'ваш-пароль'
+
+db_path: admin/data/vpn.db
+cluster_key: admin/data/cluster.key
+node_id: ru-1
+node_key: admin/data/node.key
+
+# Мастера, между которыми реплицируется БД. public_key — вывод:
+#   python -c "from admin.store import Store; print(Store('admin/data/vpn.db','admin/data/cluster.key','ru-1').node_public_key())"
+peers: []
+replication_interval: 60
+
+# Пример пира:
+# peers:
+#   - id: de-1
+#     url: https://2.27.37.211:8443
+#     public_key: "base64url-ed25519-public-key"
+#     insecure: false
+
+rules_sources:
+  geoip: "https://www.ipdeny.com/ipblocks/data/countries/ru.zone"
+  domains: "https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/domains_all.lst"
+
+# Панель слушает только localhost. Доступ через SSH-туннель:
+#   ssh -L 8444:127.0.0.1:8444 root@SERVER
+listen_host: 127.0.0.1
+listen_port: 8444
+
+# Публичный адрес VPN-сервера, на котором будет доступна /sub/<token>.
+public_base_url: https://177.3.220.12:8443
+
+admin_username: admin
+admin_password_hash: "scrypt$REPLACE_ME"
+session_ttl_hours: 12
+
+# Каталог с публичными списками (geoip-ru.txt, ru-domains.txt).
+# Отдаётся как /rules/<name> через VPN-сервер.
+rules_dir: admin/data/rules
+
+subscription:
+  auto_update_hours: 6
+  nodes:
+    - id: ru-1
+      name: "RU exit"
+      url: https://177.3.220.12:8443
+      region: RU
+    - id: de-1
+      name: "DE exit"
+      url: https://2.27.37.211:8443
+      region: DE
+  profiles:
+    - name: "Split"
+      routes:
+        - name: "RU exit"
+          hops:
+            - candidates: ["ru-1"]
+        - name: "EU exits"
+          hops:
+            - candidates: ["de-1"]
+              strategy: round
+  split_routing:
+    enabled: true
+    default: non_ru
+    rules:
+      geoip: "geoip-ru.txt"
+      domains: "ru-domains.txt"
+    actions:
+      ru:
+        route: "RU exit"
+      non_ru:
+        route: "EU exits"
+      private:
+        direct: true

@@ -24,6 +24,8 @@ class ProxyService : Service() {
         const val ACTION_START = "com.vpnproxy.START"
         const val ACTION_STOP = "com.vpnproxy.STOP"
         const val ACTION_STATE = "com.vpnproxy.STATE"
+        const val ACTION_URL_STATUS = "com.vpnproxy.URL_STATUS"
+        const val ACTION_RESET_URL_ERRORS = "com.vpnproxy.RESET_URL_ERRORS"
 
         // Разделяемое состояние: позволяет UI прочитать фактическое состояние
         // сервиса при запуске Activity (если сервис уже работает после рестарта процесса).
@@ -32,6 +34,8 @@ class ProxyService : Service() {
     }
 
     private var pythonThread: Thread? = null
+    private var statusThread: Thread? = null
+    @Volatile
     private var pythonStarted = false
 
     private fun log(msg: String) {
@@ -65,6 +69,10 @@ class ProxyService : Service() {
             ACTION_STOP -> {
                 log("Service received STOP action")
                 stopProxy()
+            }
+            ACTION_RESET_URL_ERRORS -> {
+                log("Service received RESET_URL_ERRORS action")
+                resetUrlErrors()
             }
         }
         return START_STICKY
@@ -118,6 +126,7 @@ class ProxyService : Service() {
 
         updateNotification("Proxy running")
         broadcastState(true)
+        startStatusPoller()
 
         if (ConfigManager(this).getActiveProfile().mode == "vpn") {
             log("Mode is VPN, starting TunService")
@@ -149,6 +158,8 @@ class ProxyService : Service() {
     private fun stopProxy() {
         stopTunService()
         pythonStarted = false
+        statusThread?.interrupt()
+        statusThread = null
         if (Python.isStarted()) {
             try {
                 val py = Python.getInstance()
@@ -166,6 +177,47 @@ class ProxyService : Service() {
     override fun onDestroy() {
         stopProxy()
         super.onDestroy()
+    }
+
+    /** Периодически отправляет UI снимок состояния URL (карантин/ошибки). */
+    private fun startStatusPoller() {
+        if (statusThread?.isAlive == true) return
+        statusThread = Thread({
+            while (pythonStarted) {
+                broadcastUrlStatus()
+                try {
+                    Thread.sleep(1500)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+        }, "url-status").also { it.start() }
+    }
+
+    private fun broadcastUrlStatus() {
+        if (!pythonStarted || !Python.isStarted()) return
+        try {
+            val json = Python.getInstance()
+                .getModule("proxy_engine")
+                .callAttr("get_url_status")
+                ?.toString() ?: "[]"
+            sendBroadcast(Intent(ACTION_URL_STATUS).apply {
+                putExtra("status", json)
+                setPackage(packageName)
+            })
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun resetUrlErrors() {
+        if (!pythonStarted || !Python.isStarted()) return
+        try {
+            Python.getInstance()
+                .getModule("proxy_engine")
+                .callAttr("reset_url_status")
+            broadcastUrlStatus()
+        } catch (_: Exception) {
+        }
     }
 
     private fun createNotificationChannel() {

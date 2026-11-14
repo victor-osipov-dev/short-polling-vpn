@@ -9,11 +9,14 @@
 """
 
 import asyncio
+import base64
 import logging
 import os
 import random
 import struct
 import time
+import uuid
+from collections import defaultdict
 from typing import Optional
 
 import httpx
@@ -28,6 +31,8 @@ from crypto_utils import (
     b64u_encode, b64u_decode,
 )
 from cdn_paths import random_cdn_path
+from subscription import load_and_apply, load_subscription, apply_subscription
+from split_routing import SplitRouter
 
 logger = logging.getLogger("vpn-tunnel")
 
@@ -43,6 +48,11 @@ class ClientSession:
         self.pending_new = None
         self.closed = False
         self.fin_sent = False
+        # URL входа, за которым закреплена сессия. Все кадры этой сессии
+        # должны идти только туда, иначе сервер не найдёт своё состояние.
+        self.server_base: str = ""
+        # Полная цепочка node_id (entry, relay..., exit) для relay-маршрута.
+        self.route: tuple[str, ...] = ()
 
     def next_seq(self) -> int:
         self.seq += 1
@@ -61,19 +71,28 @@ class ClientTunnel:
     """
 
     def __init__(self, cfg: dict):
+        cfg = load_and_apply(cfg)
+        self.cfg = cfg
         client_cfg = cfg["client"]
         sec_cfg = cfg["security"]
 
         self.client_id = os.urandom(16)
         urls = client_cfg.get("server_urls") or [client_cfg.get("server_url", "")]
-        self.server_urls = [u.rstrip("/") for u in urls if u]
-        self.server_base = self.server_urls[0] if self.server_urls else client_cfg.get("server_url", "").rstrip("/")
+        self.all_server_urls = [u.rstrip("/") for u in urls if u]
+        disabled = client_cfg.get("disabled_urls") or []
+        self.disabled_urls = {u.rstrip("/") for u in disabled if u}
+        self.server_urls = [u for u in self.all_server_urls if u not in self.disabled_urls]
+        self.server_base = (self.server_urls[0] if self.server_urls else
+                            (self.all_server_urls[0] if self.all_server_urls
+                             else client_cfg.get("server_url", "").rstrip("/")))
+        self._no_url_warned = False
         self.server_selector = str(client_cfg.get("server_selector", "random")).lower()
         self._rr_index = 0
         self._url_failures = {}
         self._url_cooldown_until = {}
         self.url_fail_limit = max(1, int(client_cfg.get("url_fail_limit", 3)))
         self.url_cooldown_seconds = max(1, int(client_cfg.get("url_cooldown_seconds", 60)))
+        self._all_q_logged = False
         self.poll_path = client_cfg.get("poll_path", "/poll")
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
         self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
@@ -87,6 +106,22 @@ class ClientTunnel:
         self.enc_key = derive_key(sec_cfg["psk"].strip())
         self.hmac_key = derive_hmac_key(sec_cfg["psk"].strip())
 
+        # Per-user режим: пользователь и устройство из подписки.
+        user_cfg = cfg.get("user") or {}
+        self.user_id = str(user_cfg.get("uuid") or "").strip()
+        self.device_id = str(user_cfg.get("device_id") or "").strip()
+        user_secret = user_cfg.get("secret") or ""
+        if self.user_id and user_secret:
+            if not self.device_id:
+                self.device_id = str(uuid.uuid4())
+            secret = b64u_decode(str(user_secret))
+            psk_b64 = base64.b64encode(secret).decode()
+            self.enc_key = derive_key(psk_b64)
+            self.hmac_key = derive_hmac_key(psk_b64)
+        else:
+            self.user_id = ""
+            self.device_id = ""
+
         idle_cfg = client_cfg.get("idle_timeout", {})
         self.idle_timeout_enabled = idle_cfg.get("enabled", False)
         self.idle_timeout_seconds = int(idle_cfg.get("seconds", 300))
@@ -98,7 +133,15 @@ class ClientTunnel:
         self.http = httpx.AsyncClient(http2=True, verify=verify_tls, timeout=15.0, trust_env=trust_env)
         self._stop = False
 
-        self.time_offset = 0
+        # Смещение времени своё для каждого URL: часы серверов могут
+        # расходиться, и общий offset ломал бы HMAC при мультисервере.
+        self._time_offsets: dict[str, int] = {}
+        self.split_router = SplitRouter(cfg)
+
+        sub_cfg = cfg.get("subscription") or {}
+        self._sub_source = sub_cfg.get("url") or sub_cfg.get("file") or ""
+        self._sub_interval = max(3600, int(sub_cfg.get("auto_update_hours", 6)) * 3600)
+        self._sub_task: asyncio.Task | None = None
 
         dns_cfg = client_cfg.get("dns_relay", {})
         self.dns_relay_enabled = dns_cfg.get("enabled", False)
@@ -123,17 +166,25 @@ class ClientTunnel:
         client_cfg = cfg["client"]
 
         urls = client_cfg.get("server_urls") or [client_cfg.get("server_url", "")]
-        new_urls = [u.rstrip("/") for u in urls if u]
-        if new_urls != self.server_urls:
+        new_all = [u.rstrip("/") for u in urls if u]
+        disabled = client_cfg.get("disabled_urls") or []
+        new_disabled = {u.rstrip("/") for u in disabled if u}
+        new_urls = [u for u in new_all if u not in new_disabled]
+        if new_urls != self.server_urls or new_disabled != self.disabled_urls:
             logger.info("Config reload: server_urls changed")
+            self.all_server_urls = new_all
+            self.disabled_urls = new_disabled
             self.server_urls = new_urls
             self.server_base = new_urls[0] if new_urls else self.server_base
             self._url_failures.clear()
             self._url_cooldown_until.clear()
+            self._no_url_warned = False
+            self._time_offsets.clear()
 
         self.server_selector = str(client_cfg.get("server_selector", "random")).lower()
         self.url_fail_limit = max(1, int(client_cfg.get("url_fail_limit", 3)))
         self.url_cooldown_seconds = max(1, int(client_cfg.get("url_cooldown_seconds", 60)))
+        self._all_q_logged = False
         self.poll_path = client_cfg.get("poll_path", "/poll")
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
         self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
@@ -148,9 +199,18 @@ class ClientTunnel:
 
     # ── Сессии ──
 
-    async def register_session(self, writer: asyncio.StreamWriter, host: str, port: int) -> bytes:
+    def route_for(self, host: str):
+        """Возвращает (mode, base_url, category) для split-routing."""
+        return self.split_router.route_for(host, set(self._available_urls()))
+
+    async def register_session(self, writer: asyncio.StreamWriter, host: str, port: int,
+                               server_base: str | None = None,
+                               route: tuple[str, ...] = ()) -> bytes:
         sid = new_session_id()
         sess = ClientSession(sid, writer)
+        # Закрепляем сессию за входным URL на всё время жизни.
+        sess.server_base = server_base or self._pick_server_base() or self.server_base
+        sess.route = tuple(route or ())
         frame = Frame.new_frame(sid, sess.next_seq(), host, port)
         sess.pending_new = frame
         async with self.lock:
@@ -224,28 +284,35 @@ class ClientTunnel:
 
     # ── URL selection ──
 
+    def _expire_quarantines(self):
+        """Снимает истёкшие карантины и даёт URL свежую попытку."""
+        now = time.time()
+        for url, until in list(self._url_cooldown_until.items()):
+            if until <= now:
+                self._url_cooldown_until.pop(url, None)
+                self._url_failures.pop(url, None)
+
     def _available_urls(self):
         now = time.time()
-        avail = [u for u in self.server_urls if self._url_cooldown_until.get(u, 0) <= now]
-        if not avail and self.server_urls:
-            logger.warning("all server URLs quarantined; resetting cooldowns")
-            self._url_cooldown_until.clear()
-            self._url_failures.clear()
-            return self.server_urls
-        return avail
+        return [u for u in self.server_urls if self._url_cooldown_until.get(u, 0) <= now]
 
     def _mark_success(self, url):
-        if url in self._url_failures or url in self._url_cooldown_until:
+        fails = self._url_failures.get(url, 0)
+        was_quarantined = url in self._url_cooldown_until
+        if fails > 0 or was_quarantined:
             self._url_failures.pop(url, None)
             self._url_cooldown_until.pop(url, None)
             logger.info("URL recovered: %s", url)
         self._url_failures[url] = 0
 
     def _mark_failure(self, url):
+        now = time.time()
         fails = self._url_failures.get(url, 0) + 1
         self._url_failures[url] = fails
-        if fails >= self.url_fail_limit and url not in self._url_cooldown_until:
-            self._url_cooldown_until[url] = time.time() + self.url_cooldown_seconds
+        # Перевзводим карантин после истечения предыдущего: старый код
+        # проверял только наличие ключа, поэтому повторно не карантинил.
+        if fails >= self.url_fail_limit and self._url_cooldown_until.get(url, 0) <= now:
+            self._url_cooldown_until[url] = now + self.url_cooldown_seconds
             logger.warning("URL quarantined for %ds: %s", self.url_cooldown_seconds, url)
 
     def _pick_server_base(self):
@@ -260,8 +327,48 @@ class ClientTunnel:
 
     # ── Polling loop ──
 
-    async def poll_loop(self):
+    async def _subscription_refresh_loop(self):
         while not self._stop:
+            await asyncio.sleep(self._sub_interval)
+            if self._stop:
+                break
+            try:
+                sub = load_subscription(self._sub_source)
+                apply_subscription(self.cfg, sub)
+                urls = self.cfg.get("client", {}).get("server_urls") or []
+                all_urls = [u.rstrip("/") for u in urls if u]
+                disabled = {u.rstrip("/") for u in (self.cfg.get("client", {}).get("disabled_urls") or [])}
+                self.all_server_urls = all_urls
+                self.server_urls = [u for u in all_urls if u not in disabled]
+                self.server_base = (self.server_urls[0] if self.server_urls else
+                                    (all_urls[0] if all_urls else self.server_base))
+                self.split_router = SplitRouter(self.cfg)
+                logger.info("subscription refreshed: %d nodes", len(self.server_urls))
+            except Exception as exc:
+                logger.warning("subscription refresh failed: %s", exc)
+
+    async def poll_loop(self):
+        if self._sub_source and self._sub_task is None:
+            self._sub_task = asyncio.create_task(self._subscription_refresh_loop())
+        while not self._stop:
+            if not self.server_urls:
+                if not self._no_url_warned:
+                    logger.warning("no enabled server URLs; polling paused")
+                    self._no_url_warned = True
+                await asyncio.sleep(1.0)
+                continue
+            self._no_url_warned = False
+            self._expire_quarantines()
+            if not self._available_urls():
+                now = time.time()
+                until = min(self._url_cooldown_until.get(u, now) for u in self.server_urls)
+                wait = max(0.5, min(until - now, 30.0))
+                if not self._all_q_logged:
+                    logger.warning("all server URLs are quarantined; waiting %.0fs", wait)
+                    self._all_q_logged = True
+                await asyncio.sleep(wait)
+                continue
+            self._all_q_logged = False
             if self.idle_timeout_enabled:
                 idle_elapsed = time.monotonic() - self._last_activity
                 if idle_elapsed >= self.idle_timeout_seconds:
@@ -289,41 +396,91 @@ class ClientTunnel:
             await asyncio.sleep(delay_ms / 1000)
 
     async def _poll_once(self):
-        frames_to_send = []
+        groups: dict[tuple[str, tuple[str, ...]], list] = defaultdict(list)
         async with self.lock:
             dead_sids = []
             for sid, sess in self.sessions.items():
+                base = sess.server_base or self.server_base
+                key = (base, tuple(sess.route or ()))
+                group = groups[key]
                 if sess.pending_new is not None:
-                    frames_to_send.append(sess.pending_new)
+                    group.append(sess.pending_new)
                     sess.pending_new = None
                 if sess.outgoing:
                     chunk = bytes(sess.outgoing[: self.max_chunk_bytes])
                     del sess.outgoing[: len(chunk)]
-                    frames_to_send.append(Frame(sid, sess.next_seq(), FLAG_DATA, chunk))
+                    group.append(Frame(sid, sess.next_seq(), FLAG_DATA, chunk))
                 if sess.closed and not sess.outgoing and not sess.fin_sent:
-                    frames_to_send.append(Frame(sid, sess.next_seq(), FLAG_FIN, b""))
+                    group.append(Frame(sid, sess.next_seq(), FLAG_FIN, b""))
                     sess.fin_sent = True
                     dead_sids.append(sid)
             for sid in dead_sids:
                 del self.sessions[sid]
+
             if self._fin_outbox:
-                for sid in self._fin_outbox:
-                    frames_to_send.append(Frame(sid, 0, FLAG_FIN, b""))
+                for base, sid in self._fin_outbox:
+                    groups[(base or self.server_base, ())].append(Frame(sid, 0, FLAG_FIN, b""))
                 self._fin_outbox = []
+
             if self._dns_outbox:
-                frames_to_send.extend(self._dns_outbox)
+                for frame in self._dns_outbox:
+                    base = self._pick_server_base() or self.server_base
+                    groups[(base, ())].append(frame)
                 self._dns_outbox = []
             self._prune_dns_pending()
 
+            # Опрашиваем все доступные URL (пустой route), чтобы забирать
+            # буферизованные ответы, плюс группы relay-маршрутов.
+            available = set(self._available_urls())
+            for base in available:
+                groups.setdefault((base, ()), [])
+
+        if not groups:
+            return
+
+        # Сессии на отключённых/карантинных URL работать не могут.
+        for key in list(groups):
+            base = key[0]
+            if base not in available:
+                await self._fail_base_sessions(base, "URL disabled or quarantined")
+                for k in [k for k in groups if k[0] == base]:
+                    groups.pop(k, None)
+
+        if not groups:
+            return
+
+        results = await asyncio.gather(
+            *(self._poll_base(base, frames, route) for (base, route), frames in groups.items()),
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error("poll task error: %s", r)
+
+    async def _poll_base(self, url_base: str, frames_to_send,
+                         route: tuple[str, ...] = ()) -> None:
+        """Один poll-запрос к конкретному входному URL."""
         batch = pack_frames(frames_to_send)
         blob = encrypt(self.enc_key, batch)
 
-        now = time.time() + self.time_offset
+        offset = self._time_offsets.get(url_base, 0)
+        now = time.time() + offset
         ts = str(int(now))
-        mac = sign(self.hmac_key, self.client_id + ts.encode() + blob)
+        route_hdr = ",".join(route) if len(route) > 1 else ""
+        route_bytes = route_hdr.encode() if route_hdr else b""
+        if self.user_id:
+            mac = sign(self.hmac_key, self.client_id + self.user_id.encode()
+                       + self.device_id.encode() + route_bytes + ts.encode() + blob)
+        else:
+            mac = sign(self.hmac_key, self.client_id + route_bytes + ts.encode() + blob)
 
         params = {"t": ts}
         headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac, "X-Proto": PROTO_VERSION}
+        if self.user_id:
+            headers["X-User"] = self.user_id
+            headers["X-Device"] = self.device_id
+        if route_hdr:
+            headers["X-Route"] = route_hdr
         if self.host_header:
             headers["Host"] = self.host_header
         if self.poll_data_in == "header":
@@ -334,33 +491,59 @@ class ClientTunnel:
             kwargs["content"] = b64u_encode(blob)
 
         self._poll_count += 1
+        url = url_base + random_cdn_path(self.poll_path)
         try:
-            url_base = self._pick_server_base()
-            url = url_base + random_cdn_path(self.poll_path)
             async with self.http.stream(self.poll_method, url, **kwargs) as resp:
                 if "Date" in resp.headers:
                     try:
                         import email.utils
                         server_time = email.utils.parsedate_to_datetime(resp.headers["Date"]).timestamp()
-                        new_offset = int(server_time - (now - self.time_offset))
-                        if abs(new_offset - self.time_offset) > 2:
-                            logger.info("Time sync: server drift %ds, adjusting", new_offset)
-                            self.time_offset = new_offset
+                        new_offset = int(server_time - time.time())
+                        if abs(new_offset - offset) > 2:
+                            logger.info("Time sync: %s drift %ds, adjusting", url_base, new_offset)
+                            self._time_offsets[url_base] = new_offset
                     except Exception:
                         pass
 
                 if resp.status_code == 403:
                     logger.warning("ERROR 403: Forbidden. Check PSK and Time Sync!")
                 if resp.status_code >= 400:
+                    # Считаем ошибку ровно один раз: раньше _mark_failure()
+                    # вызывался ещё и в except после raise_for_status().
                     self._mark_failure(url_base)
-                else:
-                    self._mark_success(url_base)
-                resp.raise_for_status()
+                    logger.error("poll HTTP %s from %s", resp.status_code, url_base)
+                    await self._handle_base_failure(url_base, f"HTTP {resp.status_code}", bool(frames_to_send))
+                    return
+                self._mark_success(url_base)
                 await self._handle_stream_response(resp)
         except Exception as e:
-            self._mark_failure(url_base if 'url_base' in locals() else self.server_base)
+            self._mark_failure(url_base)
             if "403" not in str(e):
-                logger.error("poll request failed: %s", e)
+                logger.error("poll request failed (%s): %s", url_base, e)
+            await self._handle_base_failure(url_base, str(e), bool(frames_to_send))
+
+    async def _handle_base_failure(self, url_base: str, reason: str, had_frames: bool) -> None:
+        """Закрывает сессии, закреплённые за упавшим URL, если в запросе
+        были их данные или URL уже ушёл в карантин."""
+        quarantined = self._url_cooldown_until.get(url_base, 0) > time.time()
+        if had_frames or quarantined:
+            await self._fail_base_sessions(url_base, reason)
+
+    async def _fail_base_sessions(self, url_base: str, reason: str) -> None:
+        closed = 0
+        async with self.lock:
+            for sid, sess in list(self.sessions.items()):
+                if (sess.server_base or self.server_base) != url_base:
+                    continue
+                self.sessions.pop(sid, None)
+                closed += 1
+                try:
+                    sess.writer.close()
+                except Exception:
+                    pass
+        if closed:
+            logger.warning("closed %d session(s) pinned to failed URL %s (%s)",
+                           closed, url_base, reason)
 
     async def _handle_stream_response(self, resp):
         buf = bytearray()
@@ -454,7 +637,8 @@ class ClientTunnel:
     async def _drop_session(self, sid: bytes):
         async with self.lock:
             sess = self.sessions.pop(sid, None)
-            self._fin_outbox.append(sid)
+            if sess is not None:
+                self._fin_outbox.append((sess.server_base, sid))
         if sess is not None:
             try:
                 sess.writer.close()
@@ -463,6 +647,8 @@ class ClientTunnel:
 
     async def stop(self):
         self._stop = True
+        if self._sub_task:
+            self._sub_task.cancel()
         if self._dns_task:
             self._dns_task.cancel()
         if self._dns_transport:

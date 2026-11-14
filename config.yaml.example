@@ -3,6 +3,36 @@
 # ============================================================
 mode: client
 
+# Для режима server: идентичность узла и пиры для relay-цепочек.
+# node_id: "ru-1"
+# relay_secret: "REPLACE_WITH_SHARED_RELAY_SECRET"
+# peers:
+#   de-1: "https://2.27.37.211:8443"
+
+# Подписка: URL или локальный JSON. Если задана — user/узлы/профили
+# и split-routing подтянутся с сервера.
+# subscription:
+#   url: "https://177.3.220.12:8443/sub/<token>"
+#   file: ""
+
+# Split-routing: классификация домен/IP и выбор маршрута.
+# split_routing:
+#   enabled: true
+#   default: non_ru
+#   actions:
+#     ru: {route: "RU exit"}
+#     non_ru: {route: "EU exits"}
+#     private: {direct: true}
+#   rules:
+#     geoip: "https://177.3.220.12:8443/rules/geoip-ru.txt"
+#     domains: "https://177.3.220.12:8443/rules/ru-domains.txt"
+
+# Пользователь из подписки (для per-user auth). Если не задан — legacy PSK.
+# user:
+#   uuid: "7b1c2f1e-5a42-4c1e-9b2a-2f6d8c1e4a10"
+#   secret: "base64url-32-bytes"
+#   device_id: "9a2e6f10-3c44-4b9e-8e7d-1a2b3c4d5e6f"
+
 client:
   socks5:
     bind_host: 127.0.0.1
@@ -12,6 +42,9 @@ client:
   poll_interval_ms: 200
   poll_jitter_ms: 50
   max_chunk_bytes: 4096
+  url_fail_limit: 3            # ошибок подряд до отправки URL в карантин
+  url_cooldown_seconds: 60     # время карантина URL (секунды)
+  disabled_urls: []            # URL, временно исключённые из ротации
   verify_tls: true
   poll_method: POST          # GET or POST
   poll_data_in: body         # body or header — куда класть d (зашифрованные данные)
@@ -32,6 +65,7 @@ server:
   idle_timeout_seconds: 200
   dns_resolver: "8.8.8.8"    # куда сервер пересылает DNS-запросы (IP или hostname)
   dns_resolver_port: 53
+  admin_service_url: "http://127.0.0.1:8444"  # необязательно: /sub/<token> проксируется в панель
   tls:
     cert: "/path/to/fullchain.pem"
     key: "/path/to/privkey.pem"
@@ -39,6 +73,12 @@ server:
 security:
   psk: "REPLACE_WITH_GENERATED_PSK"
   hmac_window_seconds: 30
+
+# Пользователи из admin-панели (та же SQLite-БД и cluster-ключ).
+# Если блок отсутствует — работает legacy-режим с общим PSK.
+users:
+  db_path: "/opt/short-polling-vpn/admin/data/vpn.db"
+  cluster_key: "/opt/short-polling-vpn/admin/data/cluster.key"
 
 logging:
   level: DEBUG

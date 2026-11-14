@@ -15,11 +15,16 @@ _pump_remote_to_buffer — так short polling не теряет данные �
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import logging
+import re
 import socket
 import struct
 import time
 
+import aiohttp
 from aiohttp import web
 
 from protocol import (
@@ -31,6 +36,7 @@ from crypto_utils import (
     derive_key, derive_hmac_key, encrypt, decrypt, verify,
     b64u_encode, b64u_decode,
 )
+from user_auth import UserAuth
 
 logger = logging.getLogger("vpn-server")
 
@@ -41,6 +47,29 @@ logger = logging.getLogger("vpn-server")
 # огромного тела ответа (лечит WinError 64 на больших ответах).
 STREAM_RECORD_SIZE = 60000
 AES_GCM_OVERHEAD = 12 + 16  # nonce + tag
+
+
+def _auth_session_key(user_id: str, device_id: str) -> bytes:
+    """Стабильный ключ сессий пользователя/устройства (32 байта)."""
+    return hashlib.sha256(f"user:{user_id}:{device_id}".encode()).digest()
+
+
+def _relay_mac(secret: str, method: str, path_qs: str, route: list[str],
+               ts: str, body: bytes) -> str:
+    message = (f"{method}\n{path_qs}\n{','.join(route)}\n{ts}\n"
+               f"{hashlib.sha256(body).hexdigest()}").encode()
+    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
+def _parse_route(raw: str) -> list[str]:
+    if not raw:
+        return []
+    route = [part.strip() for part in raw.split(",") if part.strip()]
+    if len(route) > 3 or len(set(route)) != len(route):
+        return []
+    if any(not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", part) for part in route):
+        return []
+    return route
 
 
 def iter_stream_records(frames):
@@ -177,6 +206,126 @@ def fake_response(request) -> web.Response:
               '<h1>404 Not Found</h1><p>The requested URL was not found on '
               'this server.</p></center></body></html>'),
     )
+
+
+async def relay_forward(app, request: web.Request, route: list[str],
+                        next_id: str, body: bytes) -> web.Response:
+    """Форвардит poll на следующий узел цепочки (payload не расшифровывается)."""
+    base = (app.get("peers") or {}).get(next_id)
+    secret = app.get("relay_secret") or ""
+    if not base or not secret:
+        return fake_response(request)
+    headers = {}
+    for key in ("X-Cid", "X-Mac", "X-Proto", "X-Data", "X-User", "X-Device"):
+        value = request.headers.get(key)
+        if value is not None:
+            headers[key] = value
+    headers["X-Route"] = ",".join(route)
+    ts = str(int(time.time()))
+    headers["X-Relay-Id"] = app.get("node_id", "")
+    headers["X-Relay-Ts"] = ts
+    headers["X-Relay-Mac"] = _relay_mac(
+        app.get("relay_secret", ""), "POST", request.path_qs, route, ts, body
+    )
+    url = str(base).rstrip("/") + request.path_qs
+    timeout = aiohttp.ClientTimeout(total=45)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, data=body, headers=headers) as resp:
+                payload = await resp.read()
+                out_headers = {}
+                for key in ("Content-Type", "Cache-Control"):
+                    if key in resp.headers:
+                        out_headers[key] = resp.headers[key]
+                return web.Response(status=resp.status, body=payload, headers=out_headers)
+    except Exception as exc:
+        logger.warning("relay to %s failed: %s", next_id, exc)
+        return fake_response(request)
+
+
+async def subscription_proxy_handler(request: web.Request) -> web.Response:
+    """Проксирует /sub/<token> в локальную admin-панель.
+
+    Панель слушает только 127.0.0.1 и доступна админу через SSH-туннель,
+    но подписка должна быть доступна клиентам снаружи — поэтому отдаём
+    её через VPN-сервер (8443, TLS).
+    """
+    base = request.app.get("admin_service_url")
+    token = request.match_info.get("token", "")
+    if not base or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", token):
+        return fake_response(request)
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{base}/sub/{token}") as resp:
+                body = await resp.read()
+                return web.Response(
+                    status=resp.status,
+                    body=body,
+                    content_type=resp.content_type,
+                    headers={"Cache-Control": "no-store"},
+                )
+    except Exception:
+        return fake_response(request)
+
+
+async def replication_proxy_handler(request: web.Request) -> web.Response:
+    """Проксирует /replicate/ops в admin-панель на localhost.
+
+    Подпись запроса проверяет панель по публичным ключам peers.
+    """
+    base = request.app.get("admin_service_url")
+    if not base:
+        return fake_response(request)
+    body = await request.read()
+    headers = {
+        k: request.headers[k]
+        for k in ("X-Node-Id", "X-Node-Ts", "X-Node-Sig", "Content-Type")
+        if k in request.headers
+    }
+    url = f"{base}/replicate/ops"
+    if request.query_string:
+        url += "?" + request.query_string
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.request(
+                request.method, url, data=body if request.method == "POST" else None,
+                headers=headers,
+            ) as resp:
+                payload = await resp.read()
+                return web.Response(
+                    status=resp.status,
+                    body=payload,
+                    content_type=resp.content_type,
+                    headers={"Cache-Control": "no-store"},
+                )
+    except Exception:
+        return fake_response(request)
+
+
+async def rules_proxy_handler(request: web.Request) -> web.Response:
+    """Проксирует /rules/<name> в admin-панель (публичные списки)."""
+    base = request.app.get("admin_service_url")
+    name = request.match_info.get("name", "")
+    if not base or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name):
+        return fake_response(request)
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{base}/rules/{name}") as resp:
+                body = await resp.read()
+                headers = {}
+                if "Cache-Control" in resp.headers:
+                    headers["Cache-Control"] = resp.headers["Cache-Control"]
+                return web.Response(
+                    status=resp.status,
+                    body=body,
+                    content_type=resp.content_type,
+                    headers=headers,
+                )
+    except Exception:
+        return fake_response(request)
 
 
 def enable_tcp_keepalive(transport) -> None:
@@ -457,6 +606,17 @@ class SessionManager:
                 del sessions[sid]
         return frames
 
+    async def drop_client(self, client_id: bytes) -> None:
+        """Закрывает все сессии клиента (например, при отключении пользователя)."""
+        async with self.lock:
+            sessions = self.clients.pop(client_id, {})
+            self._pending_opens.pop(client_id, None)
+            self._pending_data.pop(client_id, None)
+            self._dns_replies.pop(client_id, None)
+            self.last_seen.pop(client_id, None)
+        for sess in sessions.values():
+            sess.close()
+
     async def reap_idle_clients(self):
         """Периодически закрывает все сессии клиентов, которые давно не опрашивали сервер."""
         while True:
@@ -518,14 +678,49 @@ async def poll_handler(request: web.Request):
             return web.Response(status=400, text="bad encoding")
         return fake_response(request)
 
-    hmac_key = app["hmac_key"]
-    if not verify(hmac_key, client_id + ts.encode() + blob, mac):
+    user_id = request.headers.get("X-User")
+    device_id = request.headers.get("X-Device")
+    raw_route = request.headers.get("X-Route", "")
+    route = _parse_route(raw_route)
+    if raw_route and not route:
+        if debug:
+            logger.warning("403 bad route: %s", raw_route)
+        return fake_response(request)
+    auth: UserAuth | None = app.get("user_auth")
+    mgr: SessionManager = app["session_mgr"]
+
+    if user_id or device_id:
+        # Новый режим: пользователь + устройство, ключи из per-user секрета.
+        if not (user_id and device_id and auth):
+            if debug:
+                logger.warning("403 incomplete user headers: user=%s device=%s",
+                               bool(user_id), bool(device_id))
+            return fake_response(request)
+        session_client = _auth_session_key(user_id, device_id)
+        secret = auth.authenticate(user_id, device_id)
+        if secret is None:
+            await mgr.drop_client(session_client)
+            if debug:
+                logger.warning("403 user disabled/unknown: user=%s device=%s", user_id, device_id)
+            return fake_response(request)
+        psk_b64 = base64.b64encode(secret).decode()
+        hmac_key = derive_hmac_key(psk_b64)
+        enc_key = derive_key(psk_b64)
+        mac_data = (client_id + user_id.encode() + device_id.encode()
+                    + raw_route.encode() + ts.encode() + blob)
+    else:
+        hmac_key = app["hmac_key"]
+        enc_key = app["enc_key"]
+        session_client = client_id
+        mac_data = client_id + raw_route.encode() + ts.encode() + blob
+
+    if not verify(hmac_key, mac_data, mac):
         if debug:
             from crypto_utils import sign as _sign
-            expected = _sign(hmac_key, client_id + ts.encode() + blob)
-            logger.warning("403 bad mac: cid=%s ts=%s blob_len=%s d64_len=%s "
+            expected = _sign(hmac_key, mac_data)
+            logger.warning("403 bad mac: cid=%s user=%s ts=%s blob_len=%s d64_len=%s "
                            "got_mac=%s expected_mac=%s",
-                           cid_b64, ts, len(blob), len(d_b64), mac, expected)
+                           cid_b64, user_id, ts, len(blob), len(d_b64), mac, expected)
             return web.Response(status=403, text="bad mac")
         return fake_response(request)
 
@@ -544,19 +739,67 @@ async def poll_handler(request: web.Request):
             return web.Response(status=403, text="stale request")
         return fake_response(request)
 
-    enc_key = app["enc_key"]
+    if user_id:
+        # Регистрируем устройство не чаще раза в минуту и проверяем лимиты.
+        ok, reason = auth.touch_device(user_id, device_id, request.remote or "")
+        if not ok:
+            await mgr.drop_client(session_client)
+            if debug:
+                logger.warning("403 device rejected: user=%s device=%s reason=%s",
+                               user_id, device_id, reason)
+            return fake_response(request)
+
+    # ── relay-цепочка ────────────────────────────────────────────────
+    node_id = app.get("node_id") or ""
+    if route:
+        if not node_id or node_id not in route:
+            if debug:
+                logger.warning("403 route %s does not include node %s", route, node_id)
+            return fake_response(request)
+        if user_id and auth:
+            user_obj = auth.store.get_user(user_id)
+            if user_obj and user_obj.allowed_hops and any(
+                    hop not in user_obj.allowed_hops for hop in route):
+                if debug:
+                    logger.warning("403 route %s not allowed for user %s", route, user_id)
+                return fake_response(request)
+        idx = route.index(node_id)
+        if idx > 0:
+            relay_secret = app.get("relay_secret") or ""
+            relay_id = request.headers.get("X-Relay-Id", "")
+            relay_ts = request.headers.get("X-Relay-Ts", "")
+            relay_mac = request.headers.get("X-Relay-Mac", "")
+            valid = False
+            if relay_secret and relay_id == route[idx - 1]:
+                try:
+                    if abs(int(time.time()) - int(relay_ts)) <= 300:
+                        expected = _relay_mac(
+                            relay_secret, request.method, request.path_qs, route,
+                            relay_ts, read_body,
+                        )
+                        valid = hmac.compare_digest(expected, relay_mac)
+                except (ValueError, TypeError):
+                    valid = False
+            if not valid:
+                if debug:
+                    logger.warning("403 bad relay signature from %s for %s", relay_id, route)
+                return fake_response(request)
+        if idx < len(route) - 1:
+            if not (app.get("relay_secret") and app.get("peers")):
+                return fake_response(request)
+            return await relay_forward(app, request, route, route[idx + 1], read_body)
+        # idx == len(route)-1 — это exit, обрабатываем кадры локально.
+
     try:
         plaintext = decrypt(enc_key, blob)
         frames = unpack_frames(plaintext)
     except Exception as e:
         if debug:
             logger.warning("400 bad payload: %s", e)
-            return web.Response(status=400, text="bad payload")
-        return fake_response(request)
+        return web.Response(status=400, text="bad payload")
 
-    mgr: SessionManager = app["session_mgr"]
-    await mgr.handle_incoming(client_id, frames)
-    out_frames = await mgr.collect_outgoing(client_id)
+    await mgr.handle_incoming(session_client, frames)
+    out_frames = await mgr.collect_outgoing(session_client)
 
     if request.headers.get("X-Proto", "1") == PROTO_VERSION:
         # Потоковый формат: magic + независимо зашифрованные рекорды.
@@ -596,6 +839,17 @@ def build_app(cfg: dict) -> web.Application:
     app["enc_key"] = derive_key(sec_cfg["psk"])
     app["hmac_key"] = derive_hmac_key(sec_cfg["psk"])
     app["hmac_window_seconds"] = int(sec_cfg.get("hmac_window_seconds", 30))
+
+    users_cfg = cfg.get("users") or {}
+    app["user_auth"] = None
+    if users_cfg.get("db_path") and users_cfg.get("cluster_key"):
+        app["user_auth"] = UserAuth(users_cfg["db_path"], users_cfg["cluster_key"])
+
+    app["node_id"] = str(cfg.get("node_id") or server_cfg.get("node_id") or "")
+    raw_peers = cfg.get("peers") or server_cfg.get("peers") or {}
+    app["peers"] = ({str(k): str(v).rstrip("/") for k, v in raw_peers.items()}
+                    if isinstance(raw_peers, dict) else {})
+    app["relay_secret"] = str(cfg.get("relay_secret") or server_cfg.get("relay_secret") or "")
     app["session_mgr"] = SessionManager(
         max_chunk_bytes=int(server_cfg.get("max_chunk_bytes", 4096)),
         idle_timeout=int(server_cfg.get("idle_timeout_seconds", 120)),
@@ -605,6 +859,16 @@ def build_app(cfg: dict) -> web.Application:
     poll_path = server_cfg.get("poll_path", "/poll")
     app.router.add_route("GET", poll_path, poll_handler)
     app.router.add_route("POST", poll_path, poll_handler)
+
+    # Публичная выдача подписок: проксируем в admin-панель на localhost.
+    admin_cfg = cfg.get("admin") or {}
+    admin_url = admin_cfg.get("service_url") or server_cfg.get("admin_service_url")
+    if admin_url:
+        app["admin_service_url"] = str(admin_url).rstrip("/")
+        app.router.add_route("GET", "/sub/{token}", subscription_proxy_handler)
+        app.router.add_route("GET", "/rules/{name}", rules_proxy_handler)
+        app.router.add_route("GET", "/replicate/ops", replication_proxy_handler)
+        app.router.add_route("POST", "/replicate/ops", replication_proxy_handler)
     # Клиент генерирует случайное "CDN-образное" продолжение пути поверх poll_path.
     # Принимаем любой путь как poll-хендлер (наиболее специфичные маршруты выше
     # имеют приоритет, этот catch-all ловит всё остальное).
@@ -616,6 +880,9 @@ def build_app(cfg: dict) -> web.Application:
 
     async def _stop_background(app):
         app["reaper_task"].cancel()
+        auth = app.get("user_auth")
+        if auth:
+            auth.close()
 
     app.on_startup.append(_start_background)
     app.on_cleanup.append(_stop_background)

@@ -79,6 +79,42 @@ async def socks5_handshake(reader: asyncio.StreamReader,
     return "CONNECT", host, port
 
 
+async def _handle_direct(writer: asyncio.StreamWriter, reader: asyncio.StreamReader,
+                         host: str, port: int) -> None:
+    """Прямое соединение (split-routing direct) без VPN."""
+    try:
+        remote_reader, remote_writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=10
+        )
+    except Exception as exc:
+        logger.warning("direct connect %s:%s failed: %s", host, port, exc)
+        writer.write(bytes([SOCKS_VERSION, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+        await writer.drain()
+        writer.close()
+        return
+    writer.write(bytes([SOCKS_VERSION, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+    await writer.drain()
+    enable_tcp_keepalive(remote_writer.transport)
+
+    async def pump(src, dst):
+        try:
+            while True:
+                data = await src.read(65536)
+                if not data:
+                    break
+                dst.write(data)
+                await dst.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                dst.close()
+            except Exception:
+                pass
+
+    await asyncio.gather(pump(reader, remote_writer), pump(remote_reader, writer))
+
+
 async def handle_socks_client(
     tunnel,
     reader: asyncio.StreamReader,
@@ -104,10 +140,22 @@ async def handle_socks_client(
         writer.close()
         return
 
+    route = ("tunnel", None, None)
+    if hasattr(tunnel, "route_for"):
+        try:
+            route = tunnel.route_for(host)
+        except Exception as exc:
+            logger.warning("route_for(%s) failed: %s", host, exc)
+
+    if route[0] == "direct":
+        await _handle_direct(writer, reader, host, port)
+        return
+
     writer.write(bytes([SOCKS_VERSION, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
     await writer.drain()
 
-    sid = await tunnel.register_session(writer, host, port)
+    sid = await tunnel.register_session(writer, host, port, server_base=route[1],
+                                        route=route[2] if len(route) > 2 else ())
     enable_tcp_keepalive(writer.transport)
 
     if on_connect:

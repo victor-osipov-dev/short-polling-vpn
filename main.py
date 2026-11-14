@@ -27,6 +27,9 @@ def setup_logging(cfg: dict):
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # aiohttp логирует каждый poll-запрос в INFO. При 5-20 запросах/с это
+    # забивает журнал сервера — оставляем только ошибки доступа.
+    logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
 
 def main():

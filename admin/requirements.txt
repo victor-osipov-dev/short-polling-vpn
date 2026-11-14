@@ -1,0 +1,4 @@
+# Зависимости панели (VPN-сервер использует свой requirements.txt)
+pyyaml>=6.0
+cryptography>=42.0
+qrcode[pil]>=7.4
