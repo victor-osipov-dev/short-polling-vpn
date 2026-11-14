@@ -228,6 +228,56 @@ class Panel:
         nodes = list(sub_cfg.get("nodes", []) or [])
         if user.visible_nodes:
             nodes = [n for n in nodes if n.get("id") in user.visible_nodes]
+        url_to_node = {str(n.get("url")).rstrip("/"): n.get("id")
+                       for n in (sub_cfg.get("nodes", []) or []) if n.get("url")}
+        route_nodes: dict[str, set[str]] = {}
+        route_exits: dict[str, str] = {}
+        for prof in sub_cfg.get("profiles", []) or []:
+            for route in prof.get("routes", []) or []:
+                name = route.get("name")
+                if not name:
+                    continue
+                used: set[str] = set()
+                exit_id = ""
+                for hop in route.get("hops", []) or []:
+                    for cand in hop.get("candidates", []) or []:
+                        cand = str(cand)
+                        nid = cand if cand in url_to_node.values() else url_to_node.get(cand.rstrip("/"), "")
+                        if nid:
+                            used.add(nid)
+                            exit_id = nid
+                route_nodes[str(name)] = used
+                route_exits[str(name)] = exit_id
+
+        all_node_ids = {n.get("id") for n in (sub_cfg.get("nodes", []) or []) if n.get("id")}
+        allowed_nodes = set(user.visible_nodes) if user.visible_nodes else set(all_node_ids)
+        if user.allowed_hops:
+            allowed_nodes &= set(user.allowed_hops)
+        allowed_exits = set(user.allowed_exits) if user.allowed_exits else set()
+
+        visible_profiles = []
+        for cp in self.store.list_client_profiles():
+            if not cp.enabled:
+                continue
+            names = []
+            if cp.split_enabled:
+                names = [cp.route_ru, cp.route_non_ru, cp.route_private]
+            used: set[str] = set()
+            ok = True
+            for name in names:
+                name = (name or "").strip()
+                if not name or name == "direct":
+                    continue
+                if name not in route_nodes:
+                    ok = False
+                    break
+                used |= route_nodes[name]
+                if allowed_exits and route_exits.get(name) not in allowed_exits:
+                    ok = False
+                    break
+            if ok and used <= allowed_nodes:
+                visible_profiles.append(cp.to_public())
+
         split = dict(sub_cfg.get("split_routing", {}) or {})
         rules = dict(split.get("rules", {}) or {})
         for key in ("geoip", "domains"):
@@ -248,7 +298,7 @@ class Panel:
             },
             "nodes": nodes,
             "profiles": sub_cfg.get("profiles", []) or [],
-            "client_profiles": [p.to_public() for p in self.store.list_client_profiles() if p.enabled],
+            "client_profiles": visible_profiles,
             "split_routing": split,
         }
         return payload
@@ -461,6 +511,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.nodes_page(sess)
             if path == "/profiles":
                 return self.profiles_page(sess)
+            m = re.fullmatch(r"/profiles/([0-9a-fA-F-]{36})", path)
+            if m:
+                return self.profile_edit_page(sess, m.group(1))
             if path == "/audit":
                 return self.audit_page(sess)
             m = re.fullmatch(r"/users/([0-9a-fA-F-]{36})", path)
@@ -501,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_user(form, sess)
             if path == "/profiles/new":
                 return self.create_profile(form, sess)
-            m = re.fullmatch(r"/profiles/([0-9a-fA-F-]{36})/(update|delete)", path)
+            m = re.fullmatch(r"/profiles/([0-9a-fA-F-]{36})/(save|update|delete)", path)
             if m:
                 return self.profile_action(m.group(1), m.group(2), form, sess)
             m = re.fullmatch(r"/users/([0-9a-fA-F-]{36})/(enable|disable|delete|rotate|revoke-sub)", path)
@@ -709,24 +762,7 @@ class Handler(BaseHTTPRequestHandler):
 <td>{esc(p.mode)}</td>
 <td>{'ON' if p.split_enabled else 'off'}</td>
 <td>{esc(p.route_ru) or '—'} / {esc(p.route_non_ru) or '—'} / {esc(p.route_private) or 'direct'}</td>
-<td>
-<form method="post" action="/profiles/{esc(p.id)}/update" style="display:inline">
-<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
-<input type="hidden" name="name" value="{esc(p.name)}">
-<input type="hidden" name="mode" value="{esc(p.mode)}">
-<input type="hidden" name="enabled" value="{0 if p.enabled else 1}">
-<input type="hidden" name="split_enabled" value="{0 if p.split_enabled else 1}">
-<input type="hidden" name="route_ru" value="{esc(p.route_ru)}">
-<input type="hidden" name="route_non_ru" value="{esc(p.route_non_ru)}">
-<input type="hidden" name="route_private" value="{esc(p.route_private)}">
-<button class="secondary" type="submit">{'Disable' if p.enabled else 'Enable'}</button>
-</form>
-<form method="post" action="/profiles/{esc(p.id)}/delete" style="display:inline"
- onsubmit="return confirm('Удалить профиль?')">
-<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
-<button class="danger" type="submit">Delete</button>
-</form>
-</td>
+<td><a class="btn secondary" href="/profiles/{esc(p.id)}">Изменить</a></td>
 </tr>""")
         body = f"""
 <div class="card">
@@ -752,9 +788,44 @@ class Handler(BaseHTTPRequestHandler):
 <table><tr><th>Профиль</th><th>Режим</th><th>Split</th><th>RU / non-RU / private</th><th></th></tr>
 {''.join(rows) or '<tr><td colspan="5" class="muted">Профилей пока нет</td></tr>'}
 </table>
-<p class="muted">Все активные профили попадают в подписку (`client_profiles`) и создаются в приложении отдельными профилями.</p>
+<p class="muted">Все активные профили попадают в подписку и создаются в приложении отдельными профилями.</p>
 </div>"""
         self.send_html(page("Профили", body, self.nav(sess)))
+
+    def profile_edit_page(self, sess: dict, profile_id: str):
+        p = self.panel.store.get_client_profile(profile_id)
+        if not p:
+            return self.send_html(page("404", "<p>Профиль не найден</p>", self.nav(sess)), 404)
+        body = f"""
+<div class="card">
+<form method="post" action="/profiles/{esc(p.id)}/save">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<label>Название</label><input name="name" value="{esc(p.name)}" required>
+<label>Режим</label>
+<select name="mode">
+<option value="proxy" {'selected' if p.mode == 'proxy' else ''}>proxy</option>
+<option value="vpn" {'selected' if p.mode == 'vpn' else ''}>vpn</option>
+</select>
+<label><input type="checkbox" name="split_enabled" value="1" style="width:auto"
+ {'checked' if p.split_enabled else ''}> Split routing</label>
+<div class="row">
+<div style="flex:1"><label>RU маршрут</label><input name="route_ru" value="{esc(p.route_ru)}"></div>
+<div style="flex:1"><label>non-RU маршрут</label><input name="route_non_ru" value="{esc(p.route_non_ru)}"></div>
+<div style="flex:1"><label>Private</label><input name="route_private" value="{esc(p.route_private)}"></div>
+</div>
+<label>Порядок</label><input name="sort_order" type="number" value="{p.sort_order}">
+<div class="row" style="margin-top:14px">
+<button type="submit">Сохранить</button>
+<a class="btn secondary" href="/profiles">Назад</a>
+</div>
+</form>
+<form method="post" action="/profiles/{esc(p.id)}/delete" style="margin-top:14px"
+ onsubmit="return confirm('Удалить профиль?')">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<button class="danger" type="submit">Удалить профиль</button>
+</form>
+</div>"""
+        self.send_html(page("Профиль: " + p.name, body, self.nav(sess)))
 
     def create_profile(self, form: dict, sess: dict):
         name = (form.get("name") or "").strip()
@@ -779,17 +850,22 @@ class Handler(BaseHTTPRequestHandler):
         else:
             profile = store.get_client_profile(profile_id)
             if profile:
-                store.update_client_profile(
-                    profile_id,
-                    name=(form.get("name") or profile.name).strip(),
-                    mode=(form.get("mode") or profile.mode).strip(),
-                    enabled=(form.get("enabled") or ("0" if profile.enabled else "1")) == "1",
-                    split_enabled=(form.get("split_enabled") or
-                                   ("0" if profile.split_enabled else "1")) == "1",
-                    route_ru=(form.get("route_ru") or profile.route_ru).strip(),
-                    route_non_ru=(form.get("route_non_ru") or profile.route_non_ru).strip(),
-                    route_private=(form.get("route_private") or profile.route_private).strip(),
-                )
+                updates = {
+                    "name": (form.get("name") or profile.name).strip(),
+                    "mode": (form.get("mode") or profile.mode).strip(),
+                    "split_enabled": form.get("split_enabled") == "1",
+                    "route_ru": (form.get("route_ru") or "").strip(),
+                    "route_non_ru": (form.get("route_non_ru") or "").strip(),
+                    "route_private": (form.get("route_private") or "direct").strip() or "direct",
+                }
+                if form.get("sort_order"):
+                    try:
+                        updates["sort_order"] = int(form["sort_order"])
+                    except ValueError:
+                        pass
+                if action == "update" and "enabled" in form:
+                    updates["enabled"] = form.get("enabled") == "1"
+                store.update_client_profile(profile_id, **updates)
         self.redirect("/profiles")
 
     def nodes_page(self, sess: dict):

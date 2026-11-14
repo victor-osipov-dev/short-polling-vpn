@@ -86,7 +86,7 @@ data class UrlRuntimeStatus(
 /** Простая локализация без AppCompat: строки подставляются в Compose. */
 object L {
     @Volatile
-    var ru: Boolean = false
+    var ru: Boolean = true
 
     fun t(en: String, ru: String): String = if (this.ru) ru else en
 }
@@ -181,7 +181,7 @@ class MainActivity : ComponentActivity() {
 
     override fun attachBaseContext(newBase: Context) {
         val prefs = newBase.getSharedPreferences("vpnproxy", Context.MODE_PRIVATE)
-        val language = prefs.getString("language", "en") ?: "en"
+        val language = prefs.getString("language", "ru") ?: "ru"
         val config = Configuration(newBase.resources.configuration)
         config.setLocale(Locale(language))
         super.attachBaseContext(newBase.createConfigurationContext(config))
@@ -826,11 +826,11 @@ fun SettingsScreen(
                 containerColor = MaterialTheme.colorScheme.surface
             ) {
                 Tab(selected = selectedTab == 0, onClick = { onTabChange(0) },
-                    text = { Text(tr("General", "Общее")) })
+                    text = { Text(tr("General", "Общее"), fontSize = 12.sp, maxLines = 1) })
                 Tab(selected = selectedTab == 1, onClick = { onTabChange(1) },
-                    text = { Text(tr("Connection", "Подключение")) })
+                    text = { Text(tr("Connection", "Подключение"), fontSize = 12.sp, maxLines = 1) })
                 Tab(selected = selectedTab == 2, onClick = { onTabChange(2) },
-                    text = { Text(tr("Logs", "Логи")) })
+                    text = { Text(tr("Logs", "Логи"), fontSize = 12.sp, maxLines = 1) })
             }
             when (selectedTab) {
                 0 -> ProfilesTab(configManager, installedApps)
@@ -848,7 +848,7 @@ fun SettingsScreen(
 fun LanguageRow() {
     val context = LocalContext.current
     val prefs = context.getSharedPreferences("vpnproxy", Context.MODE_PRIVATE)
-    var current by remember { mutableStateOf(prefs.getString("language", "en") ?: "en") }
+    var current by remember { mutableStateOf(prefs.getString("language", "ru") ?: "ru") }
 
     fun apply(lang: String) {
         current = lang
@@ -1757,9 +1757,11 @@ fun RawConfigTab(configManager: ConfigManager, embedded: Boolean = false) {
         OutlinedTextField(
             value = raw,
             onValueChange = { raw = it },
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            modifier = if (embedded) {
+                Modifier.fillMaxWidth().height(320.dp)
+            } else {
+                Modifier.weight(1f).fillMaxWidth()
+            },
             textStyle = LocalTextStyle.current.copy(
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,

@@ -144,8 +144,6 @@ class PanelTest(unittest.TestCase):
         csrf_p = re.search(r'name="csrf" value="([^"]+)"', profiles_html).group(1)
         self.post("/profiles/new", {
             "csrf": csrf_p, "name": "Relay profile", "mode": "proxy",
-            "split_enabled": "1", "route_ru": "RU exit",
-            "route_non_ru": "DE exit", "route_private": "direct",
         })
         sub = json.loads(self.get(f"/users/{uuid}/sub.json").read())
         self.assertEqual(len(sub["client_profiles"]), 1)
