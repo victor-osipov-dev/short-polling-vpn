@@ -569,7 +569,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(self.panel.subscription_payload(user))
             m = re.fullmatch(r"/users/([0-9a-fA-F-]{36})/sub\.png", path)
             if m:
-                return self.qr_page(m.group(1))
+                qs = parse_qs(parsed.query)
+                mode = (qs.get("mode", ["url"])[0] or "url").lower()
+                return self.qr_page(m.group(1), mode)
             self.send_html(page("404", "<p>Не найдено</p>", self.nav(sess)), 404)
         except Exception as exc:  # не показываем детали наружу
             self.log_message("error: %s", exc)
@@ -720,6 +722,10 @@ class Handler(BaseHTTPRequestHandler):
                                         self.nav(sess)), 404)
         devices = self.panel.store.list_devices(user_uuid)
         sub_url = self.panel.sub_url(user)
+        qr_json_payload = json.dumps(self.panel.subscription_payload(user),
+                                     ensure_ascii=False, separators=(",", ":"))
+        qr_json_size = len(qr_json_payload.encode())
+        qr_json_fits = qr_json_size <= 2953
         status = ("<span class='pill ok'>active</span>" if user.enabled
                   else "<span class='pill off'>disabled</span>")
         device_rows = "".join(
@@ -752,8 +758,12 @@ class Handler(BaseHTTPRequestHandler):
 <div class="row">
 {f'<a class="btn" href="{esc(sub_url)}">Открыть JSON</a>' if sub_url else ''}
 <a class="btn secondary" href="/users/{esc(user.uuid)}/sub.json">Скачать JSON</a>
-<a class="btn secondary" href="/users/{esc(user.uuid)}/sub.png">QR</a>
+<a class="btn secondary" href="/users/{esc(user.uuid)}/sub.png?mode=url">QR ссылки</a>
+{f'<a class="btn secondary" href="/users/{esc(user.uuid)}/sub.png?mode=json">QR JSON</a>' if qr_json_fits else ''}
 </div>
+<p class="muted">QR ссылки содержит только URL подписки и всегда помещается.
+QR JSON ({qr_json_size} байт) {'' if qr_json_fits else 'слишком велик для одного QR-кода: '}
+{'помещается в один QR.' if qr_json_fits else 'используйте ссылку или скачайте JSON-файл.'}</p>
 <p class="muted">Ссылка-подписка является секретом. При отзыве она перестаёт работать.</p>
 </div>
 
@@ -1262,19 +1272,62 @@ function removeHop() {{
         self.end_headers()
         self.wfile.write(data)
 
-    def qr_page(self, user_uuid: str):
+    def qr_page(self, user_uuid: str, mode: str = "url"):
         user = self.panel.store.get_user(user_uuid)
         if not user:
             return self.send_html(page("404", "<p>Не найдено</p>", ""), 404)
-        payload = json.dumps(self.panel.subscription_payload(user), ensure_ascii=False)
         try:
             import qrcode
         except ImportError:
-            return self.send_html(page("QR", "<p class='error'>Установите qrcode: pip install qrcode[pil]</p>",
-                                        ""), 503)
-        img = qrcode.make(payload)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
+            return self.send_html(page(
+                "QR", "<p class='error'>Установите qrcode: pip install qrcode[pil]</p>", ""
+            ), 503)
+
+        if mode == "json":
+            payload = json.dumps(self.panel.subscription_payload(user),
+                                 ensure_ascii=False, separators=(",", ":"))
+            error_correction = qrcode.constants.ERROR_CORRECT_L
+            max_bytes = 2953
+            label = "JSON подписки"
+        else:
+            payload = self.panel.sub_url(user)
+            if not payload:
+                return self.send_html(page(
+                    "QR",
+                    "<p class='error'>Ссылка-подписка не настроена: задайте "
+                    "<code>public_base_url</code> в конфиге панели. "
+                    "QR с полным JSON недоступен, скачайте JSON-файл.</p>",
+                    "",
+                ), 400)
+            error_correction = qrcode.constants.ERROR_CORRECT_M
+            max_bytes = 2331
+            label = "ссылка подписки"
+
+        size = len(payload.encode())
+        if size > max_bytes:
+            return self.send_html(page(
+                "QR",
+                f"<p class='error'>QR с {label} не помещается: {size} байт, "
+                f"максимум {max_bytes} байт для QR version 40. "
+                "Используйте QR ссылки или скачайте JSON-файл.</p>",
+                "",
+            ), 413)
+
+        try:
+            qr = qrcode.QRCode(error_correction=error_correction, box_size=8, border=2)
+            qr.add_data(payload)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+        except Exception as exc:
+            return self.send_html(page(
+                "QR",
+                f"<p class='error'>Не удалось сгенерировать QR: {esc(exc)}. "
+                f"Размер данных: {size} байт.</p>",
+                "",
+            ), 500)
+
         data = buf.getvalue()
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
