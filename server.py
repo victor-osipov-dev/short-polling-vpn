@@ -72,6 +72,21 @@ def _parse_route(raw: str) -> list[str]:
     return route
 
 
+def _route_reject_reason(raw: str) -> str:
+    if not raw:
+        return "empty route"
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if len(parts) > 3:
+        return f"too many hops ({len(parts)}), max 3"
+    if len(set(parts)) != len(parts):
+        dup = sorted({p for p in parts if parts.count(p) > 1})
+        return f"duplicate node_id in route: {', '.join(dup)}"
+    bad = [p for p in parts if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", p)]
+    if bad:
+        return f"invalid node_id: {', '.join(bad)}"
+    return "invalid route"
+
+
 def iter_stream_records(frames):
     """Генерирует зашифрованно-сырые plaintext каждого рекорда потокового
     ответа (без шифрования). Крупные DATA-кадры режутся на рекорды по
@@ -684,7 +699,7 @@ async def poll_handler(request: web.Request):
     route = _parse_route(raw_route)
     if raw_route and not route:
         if debug:
-            logger.warning("403 bad route: %s", raw_route)
+            logger.warning("403 %s: %s", _route_reject_reason(raw_route), raw_route)
         return fake_response(request)
     auth: UserAuth | None = app.get("user_auth")
     mgr: SessionManager = app["session_mgr"]

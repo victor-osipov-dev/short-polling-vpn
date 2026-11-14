@@ -145,10 +145,23 @@ async def handle_socks_client(
         try:
             route = tunnel.route_for(host)
         except Exception as exc:
-            logger.warning("route_for(%s) failed: %s", host, exc)
+            logger.error("route_for(%s) failed: %s", host, exc)
+            route = ("error", None, (), None, f"route selection failed: {exc}")
 
     if route[0] == "direct":
         await _handle_direct(writer, reader, host, port)
+        return
+
+    if route[0] == "error":
+        reason = route[4] if len(route) > 4 else "route unavailable"
+        logger.error("SOCKS CONNECT %s:%s rejected: %s", host, port, reason)
+        # SOCKS5 reply: general failure, затем закрываем соединение.
+        try:
+            writer.write(bytes([SOCKS_VERSION, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+            await writer.drain()
+        except Exception:
+            pass
+        writer.close()
         return
 
     writer.write(bytes([SOCKS_VERSION, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))

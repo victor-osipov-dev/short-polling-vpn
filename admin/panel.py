@@ -34,6 +34,11 @@ try:
 except ImportError:  # запуск из каталога admin/
     from store import Store, User, b64e
 
+try:
+    from split_routing import validate_route_hops
+except ImportError:  # панель может работать без клиентских модулей
+    validate_route_hops = None
+
 
 # ── пароль ───────────────────────────────────────────────────────────
 
@@ -207,6 +212,20 @@ class Panel:
         )
         self.store.on_op = self.replicator.notify
 
+    def route_node_maps(self) -> tuple[set[str], dict[str, str]]:
+        nodes = ((self.cfg.get("subscription") or {}).get("nodes") or [])
+        ids = {str(n.get("id")) for n in nodes if n.get("id")}
+        urls = {str(n.get("id")): str(n.get("url"))
+                for n in nodes if n.get("id") and n.get("url")}
+        return ids, urls
+
+    def route_issues(self, hops: list[dict]) -> list[dict]:
+        if validate_route_hops is None:
+            return [{"level": "warning",
+                     "message": "Модуль split_routing.py не найден: проверка маршрутов недоступна"}]
+        ids, urls = self.route_node_maps()
+        return validate_route_hops(hops, ids, urls)
+
     def verify_node_request(self, node_id: str, method: str, path: str, query: str,
                             body: bytes, ts: str, sig: str) -> bool:
         try:
@@ -350,9 +369,13 @@ button.warn{background:#a15c00}
 .pill{display:inline-block;border-radius:99px;padding:2px 9px;font-size:12px;background:#1b2a4a;color:#9cc9ff}
 .pill.ok{background:#103a2a;color:#5ee0a0}
 .pill.off{background:#3a1616;color:#ff9b9b}
+.pill.warn{background:#3a2a16;color:#ffd27a}
 code,pre{background:#0f1526;border:1px solid #233052;border-radius:8px;padding:2px 6px;font-family:ui-monospace,Consolas,monospace;font-size:12px}
 pre{padding:12px;overflow:auto;white-space:pre-wrap;word-break:break-all}
 .error{color:#ff9b9b}
+.issue-error{border:1px solid #7a2323;background:#2a1212;padding:12px;border-radius:10px;margin-bottom:14px}
+.issue-warn{border:1px solid #6b4b16;background:#2a2110;padding:12px;border-radius:10px;margin-bottom:14px}
+.issue-error ul,.issue-warn ul{margin:8px 0 0 18px;padding:0}
 .nav a{margin-right:14px}
 """
 
@@ -776,16 +799,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect(f"/users/{user_uuid}")
         return self.redirect("/users")
 
-    def route_edit_page(self, sess: dict, route_id: str):
-        r = self.panel.store.get_route(route_id)
-        if not r:
-            return self.send_html(page("404", "<p>Маршрут не найден</p>", self.nav(sess)), 404)
-        nodes = (self.panel.cfg.get("subscription") or {}).get("nodes") or []
-        node_options = "".join(
-            f"<option value='{esc(n.get('id'))}'>{esc(n.get('id'))} — {esc(n.get('name'))}</option>"
-            for n in nodes
-        )
-        hops = r.hops or []
+    def route_issues_html(self, issues: list[dict]) -> str:
+        errors = [i for i in (issues or []) if i.get("level") == "error"]
+        warnings = [i for i in (issues or []) if i.get("level") != "error"]
+        out = []
+        if errors:
+            out.append(
+                "<div class='issue-error'><b>Ошибки маршрута — сохранение заблокировано</b>"
+                "<ul>" + "".join(f"<li>{esc(i.get('message'))}</li>" for i in errors) + "</ul></div>"
+            )
+        if warnings:
+            out.append(
+                "<div class='issue-warn'><b>Предупреждения</b>"
+                "<ul>" + "".join(f"<li>{esc(i.get('message'))}</li>" for i in warnings) + "</ul></div>"
+            )
+        return "".join(out)
+
+    def route_form_page(self, sess: dict, *, title: str, action: str, name: str,
+                        hops: list[dict], sort_order: int = 0,
+                        issues: list[dict] | None = None,
+                        route_id: str = "", submit_label: str = "Сохранить маршрут",
+                        status: int = 200) -> None:
+        hops = hops or [{"candidates": [], "strategy": "round"}]
         hop_rows = []
         for i, hop in enumerate(hops):
             cands = ", ".join(str(c) for c in (hop.get("candidates") or []))
@@ -801,13 +836,26 @@ class Handler(BaseHTTPRequestHandler):
 <option value="random" {'selected' if strategy == 'random' else ''}>random</option>
 </select>
 </div>""")
+        delete_html = ""
+        if route_id:
+            delete_html = f"""
+<form method="post" action="/routes/{esc(route_id)}/delete" style="margin-top:14px"
+ onsubmit="return confirm('Удалить маршрут?')">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<button class="danger" type="submit">Удалить маршрут</button>
+</form>"""
         body = f"""
+{self.route_issues_html(issues or [])}
 <div class="card">
-<form method="post" action="/routes/{esc(r.id)}/save" id="routeForm">
+<p class="muted">Клиент выбирает только разные узлы: один node_id/URL не может
+встречаться дважды. Если уникальных узлов меньше числа hop-ов, маршрут
+сокращается, а в лог пишется предупреждение. Пересечение кандидатов между
+hop-ами — это предупреждение, а не ошибка.</p>
+<form method="post" action="{esc(action)}" id="routeForm">
 <input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
 <input type="hidden" name="hops_count" value="{len(hops)}" id="hopsCount">
-<label>Название маршрута</label><input name="name" value="{esc(r.name)}" required>
-<label>Порядок</label><input name="sort_order" type="number" value="{r.sort_order}">
+<label>Название маршрута</label><input name="name" value="{esc(name)}" required>
+<label>Порядок</label><input name="sort_order" type="number" value="{int(sort_order or 0)}">
 <h2>Цепочка (entry → … → exit)</h2>
 {''.join(hop_rows)}
 <div class="row" style="margin-top:10px">
@@ -815,18 +863,13 @@ class Handler(BaseHTTPRequestHandler):
 <button type="button" class="secondary" onclick="removeHop()">− Удалить последний</button>
 </div>
 <div class="row" style="margin-top:14px">
-<button type="submit">Сохранить маршрут</button>
+<button type="submit">{esc(submit_label)}</button>
 <a class="btn secondary" href="/routes">Назад</a>
 </div>
 </form>
-<form method="post" action="/routes/{esc(r.id)}/delete" style="margin-top:14px"
- onsubmit="return confirm('Удалить маршрут?')">
-<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
-<button class="danger" type="submit">Удалить маршрут</button>
-</form>
+{delete_html}
 </div>
 <script>
-const NODES = {node_options!r};
 function addHop() {{
   const n = document.getElementById('hopsCount');
   const i = parseInt(n.value, 10);
@@ -849,64 +892,111 @@ function removeHop() {{
   const inputs = document.querySelectorAll('[name^=hop_candidates_]');
   const sels = document.querySelectorAll('[name^=hop_strategy_]');
   const lastInput = inputs[inputs.length - 1];
-  const lastSel = sels[sels.length - 1];
   lastInput.closest('.card').remove();
   n.value = i - 1;
 }}
 </script>"""
-        self.send_html(page("Маршрут: " + r.name, body, self.nav(sess)))
+        self.send_html(page(title, body, self.nav(sess)), status)
 
-    def create_route(self, form: dict, sess: dict):
-        name = (form.get("name") or "").strip()
-        if not name:
-            return self.send_html(page("Ошибка", "<p class='error'>Название обязательно</p>",
-                                        self.nav(sess)), 400)
-        hops = []
+    def route_edit_page(self, sess: dict, route_id: str):
+        r = self.panel.store.get_route(route_id)
+        if not r:
+            return self.send_html(page("404", "<p>Маршрут не найден</p>", self.nav(sess)), 404)
+        issues = self.panel.route_issues(r.hops or [])
+        self.route_form_page(
+            sess,
+            title="Маршрут: " + r.name,
+            action=f"/routes/{r.id}/save",
+            name=r.name,
+            hops=r.hops or [],
+            sort_order=r.sort_order,
+            issues=issues,
+            route_id=r.id,
+        )
+
+    def parse_route_hops(self, form: dict) -> tuple[list[dict], list[int]]:
         try:
             count = int(form.get("hops_count") or 1)
         except ValueError:
             count = 1
-        for i in range(max(1, min(count, 3))):
+        hops = []
+        empty = []
+        for i in range(max(1, min(count, 10))):
             cands = [c.strip() for c in (form.get(f"hop_candidates_{i}") or "").split(",")
                      if c.strip()]
             if not cands:
+                empty.append(i + 1)
                 continue
             hops.append({"candidates": cands,
                          "strategy": form.get(f"hop_strategy_{i}") or "round"})
+        return hops, empty
+
+    def create_route(self, form: dict, sess: dict):
+        name = (form.get("name") or "").strip()
+        hops, empty = self.parse_route_hops(form)
+        issues = self.panel.route_issues(hops)
+        for n in empty:
+            issues.append({"level": "error", "message": f"Hop {n}: список кандидатов пуст"})
         if not hops:
-            return self.send_html(page("Ошибка", "<p class='error'>Нужен хотя бы один hop</p>",
-                                        self.nav(sess)), 400)
-        self.panel.store.create_route(name, hops, actor=self.panel.username)
-        self.redirect("/routes")
+            issues.append({"level": "error", "message": "Нужен хотя бы один hop"})
+        if not name:
+            issues.insert(0, {"level": "error", "message": "Название маршрута обязательно"})
+        errors = [i for i in issues if i.get("level") == "error"]
+        if errors:
+            return self.route_form_page(
+                sess,
+                title="Новый маршрут: ошибка",
+                action="/routes/new",
+                name=name,
+                hops=hops,
+                issues=issues,
+                submit_label="Создать маршрут",
+                status=400,
+            )
+        route = self.panel.store.create_route(name, hops, actor=self.panel.username)
+        self.redirect(f"/routes/{route.id}")
 
     def route_action(self, route_id: str, action: str, form: dict, sess: dict):
         if action == "delete":
             self.panel.store.delete_route(route_id, self.panel.username)
-        else:
-            hops = []
-            try:
-                count = int(form.get("hops_count") or 1)
-            except ValueError:
-                count = 1
-            for i in range(max(1, min(count, 3))):
-                cands = [c.strip() for c in (form.get(f"hop_candidates_{i}") or "").split(",")
-                         if c.strip()]
-                if cands:
-                    hops.append({"candidates": cands,
-                                 "strategy": form.get(f"hop_strategy_{i}") or "round"})
-            sort_order = None
-            if form.get("sort_order"):
-                try:
-                    sort_order = int(form["sort_order"])
-                except ValueError:
-                    pass
-            self.panel.store.update_route(
-                route_id,
-                name=(form.get("name") or "").strip() or None,
-                hops=hops or None,
-                sort_order=sort_order,
+            self.redirect("/routes")
+            return
+        current = self.panel.store.get_route(route_id)
+        name = (form.get("name") or "").strip()
+        hops, empty = self.parse_route_hops(form)
+        issues = self.panel.route_issues(hops)
+        for n in empty:
+            issues.append({"level": "error", "message": f"Hop {n}: список кандидатов пуст"})
+        if not hops:
+            issues.append({"level": "error", "message": "Нужен хотя бы один hop"})
+        if not name:
+            issues.insert(0, {"level": "error", "message": "Название маршрута обязательно"})
+        errors = [i for i in issues if i.get("level") == "error"]
+        if errors:
+            return self.route_form_page(
+                sess,
+                title="Маршрут: ошибка",
+                action=f"/routes/{route_id}/save",
+                name=name or (current.name if current else ""),
+                hops=hops,
+                sort_order=(current.sort_order if current else 0),
+                issues=issues,
+                route_id=route_id,
+                status=400,
             )
-        self.redirect("/routes")
+        sort_order = None
+        if form.get("sort_order"):
+            try:
+                sort_order = int(form["sort_order"])
+            except ValueError:
+                pass
+        self.panel.store.update_route(
+            route_id,
+            name=name,
+            hops=hops,
+            sort_order=sort_order,
+        )
+        self.redirect(f"/routes/{route_id}")
 
     def routes_page(self, sess: dict):
         routes = self.panel.store.list_routes()
@@ -915,13 +1005,25 @@ function removeHop() {{
             chain = " → ".join(
                 "/".join(str(c) for c in (h.get("candidates") or [])) for h in (r.hops or [])
             )
+            issues = self.panel.route_issues(r.hops or [])
+            errors = [i for i in issues if i.get("level") == "error"]
+            warnings = [i for i in issues if i.get("level") != "error"]
+            badge = ""
+            if errors:
+                badge = "<span class='pill off'>ошибка</span>"
+            elif warnings:
+                badge = "<span class='pill warn'>предупреждение</span>"
+            else:
+                badge = "<span class='pill ok'>ок</span>"
             rows.append(f"""
 <tr><td><b>{esc(r.name)}</b><div class="muted">{esc(r.id)}</div></td>
-<td><code>{esc(chain)}</code></td><td>{len(r.hops or [])}</td>
+<td><code>{esc(chain)}</code></td><td>{len(r.hops or [])}</td><td>{badge}</td>
 <td><a class="btn secondary" href="/routes/{esc(r.id)}">Изменить</a></td></tr>""")
         body = f"""
 <div class="card">
 <h2 style="margin-top:0">Новый маршрут</h2>
+<p class="muted">Клиент не использует один и тот же узел дважды. Пересечение
+кандидатов между hop-ами допустимо, но будет помечено предупреждением.</p>
 <form method="post" action="/routes/new">
 <input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
 <input type="hidden" name="hops_count" value="1">
@@ -933,8 +1035,8 @@ function removeHop() {{
 </div>
 <div class="card">
 <h2 style="margin-top:0">Маршруты</h2>
-<table><tr><th>Название</th><th>Цепочка</th><th>Hop-ов</th><th></th></tr>
-{''.join(rows) or '<tr><td colspan="4" class="muted">Маршрутов пока нет</td></tr>'}
+<table><tr><th>Название</th><th>Цепочка</th><th>Hop-ов</th><th>Статус</th><th></th></tr>
+{''.join(rows) or '<tr><td colspan="5" class="muted">Маршрутов пока нет</td></tr>'}
 </table>
 </div>"""
         self.send_html(page("Маршруты", body, self.nav(sess)))

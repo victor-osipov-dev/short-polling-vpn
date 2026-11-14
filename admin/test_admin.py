@@ -6,6 +6,7 @@ import re
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.parse
 import urllib.request
 from http.cookiejar import CookieJar
@@ -13,6 +14,7 @@ from http.server import ThreadingHTTPServer
 
 from admin.store import Store
 from admin.panel import Panel, Handler, hash_password
+from user_auth import UserAuth
 
 
 class StoreTest(unittest.TestCase):
@@ -114,6 +116,67 @@ class PanelTest(unittest.TestCase):
         req = urllib.request.Request(self.base + path, data=body, method="POST")
         return self.opener.open(req, timeout=5)
 
+    def test_route_validation(self):
+        self.post("/login", {"username": "admin", "password": "testpass"})
+        routes_html = self.get("/routes").read().decode()
+        csrf = re.search(r'name="csrf" value="([^"]+)"', routes_html).group(1)
+
+        # Невозможная цепочка не сохраняется и возвращает явную ошибку.
+        before = len(self.panel.store.list_routes())
+        try:
+            self.post("/routes/new", {
+                "csrf": csrf,
+                "name": "impossible",
+                "hops_count": "2",
+                "hop_candidates_0": "ru-1",
+                "hop_candidates_1": "ru-1",
+                "hop_strategy_0": "round",
+                "hop_strategy_1": "round",
+            })
+            self.fail("impossible route must be rejected")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+            self.assertIn("Невозможно построить цепочку", e.read().decode())
+        self.assertEqual(len(self.panel.store.list_routes()), before)
+
+        # Валидная цепочка с пересечением кандидатов сохраняется с предупреждением.
+        self.panel.cfg["subscription"]["nodes"].append(
+            {"id": "eu-1", "url": "https://eu.example:8443"}
+        )
+        resp = self.post("/routes/new", {
+            "csrf": csrf,
+            "name": "overlap-ok",
+            "hops_count": "2",
+            "hop_candidates_0": "ru-1, eu-1",
+            "hop_candidates_1": "ru-1, eu-1",
+            "hop_strategy_0": "round",
+            "hop_strategy_1": "round",
+        })
+        self.assertEqual(resp.status, 200)
+        self.assertIn("Предупреждения", resp.read().decode())
+        route = next(r for r in self.panel.store.list_routes() if r.name == "overlap-ok")
+        html = self.get(f"/routes/{route.id}").read().decode()
+        self.assertIn("Предупреждения", html)
+        self.assertIn("уже есть в Hop 1", html)
+        self.assertIn("предупреждение", self.get("/routes").read().decode())
+
+    def test_unknown_node_rejected(self):
+        self.post("/login", {"username": "admin", "password": "testpass"})
+        routes_html = self.get("/routes").read().decode()
+        csrf = re.search(r'name="csrf" value="([^"]+)"', routes_html).group(1)
+        try:
+            self.post("/routes/new", {
+                "csrf": csrf,
+                "name": "bad-node",
+                "hops_count": "1",
+                "hop_candidates_0": "no-such-node",
+                "hop_strategy_0": "round",
+            })
+            self.fail("unknown node must be rejected")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+            self.assertIn("неизвестный узел", e.read().decode())
+
     def test_flow(self):
         # login
         resp = self.post("/login", {"username": "admin", "password": "testpass"})
@@ -162,6 +225,22 @@ class PanelTest(unittest.TestCase):
             self.fail("disabled subscription must be rejected")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 403)
+
+
+class UserAuthLockTest(unittest.TestCase):
+    def test_touch_device_survives_locked_db(self):
+        import sqlite3
+
+        class FakeStore:
+            def register_device(self, *_a, **_kw):
+                raise sqlite3.OperationalError("database is locked")
+
+        auth = UserAuth.__new__(UserAuth)
+        auth.store = FakeStore()
+        auth._seen = {}
+        ok, reason = auth.touch_device("u-1", "d-1")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
 
 
 class ReplicationTest(unittest.TestCase):

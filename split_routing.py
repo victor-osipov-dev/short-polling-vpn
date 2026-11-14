@@ -16,6 +16,89 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger("vpn-routing")
 
+MAX_HOPS = 3
+
+
+def validate_route_hops(hops: list[dict], known_node_ids: Optional[set[str]] = None,
+                        known_node_urls: Optional[dict[str, str]] = None) -> list[dict]:
+    """Проверяет описание маршрута и возвращает список проблем.
+
+    Каждая проблема: {"level": "error"|"warning", "message": str}.
+    Ошибки не дают панели сохранить заведомо нерабочий маршрут;
+    предупреждения показывают, что клиент будет исключать повторы узлов
+    и/или сокращать цепочку.
+    """
+    issues: list[dict] = []
+
+    def add(level: str, message: str) -> None:
+        issues.append({"level": level, "message": message})
+
+    if not hops:
+        add("error", "Маршрут должен содержать хотя бы один hop")
+        return issues
+    if len(hops) > MAX_HOPS:
+        add("error", f"Максимум {MAX_HOPS} hop-а, указано {len(hops)}")
+
+    known_urls = {str(v).rstrip("/"): str(k) for k, v in (known_node_urls or {}).items()}
+    used_at: dict[str, int] = {}
+    all_keys: set[str] = set()
+    url_ids: dict[str, set[str]] = {}
+
+    for i, hop in enumerate(hops, 1):
+        raw = [str(c).strip() for c in (hop.get("candidates") or []) if str(c).strip()]
+        if not raw:
+            add("error", f"Hop {i}: список кандидатов пуст")
+            continue
+
+        seen: set[str] = set()
+        hop_keys: set[str] = set()
+        for cand in raw:
+            if cand in seen:
+                add("warning", f"Hop {i}: кандидат {cand} повторяется, будет учтён один раз")
+                continue
+            seen.add(cand)
+
+            if cand.startswith("http://") or cand.startswith("https://"):
+                url = cand.rstrip("/")
+                node_id = known_urls.get(url, "")
+                if not node_id:
+                    add("warning", f"Hop {i}: URL {url} не совпадает ни с одним узлом subscription.nodes")
+                key = node_id or url
+            else:
+                node_id = cand
+                url = (known_node_urls or {}).get(cand, "")
+                if known_node_ids is not None and cand not in known_node_ids:
+                    add("error", f"Hop {i}: неизвестный узел {cand}")
+                    continue
+                key = cand
+
+            if key in used_at and used_at[key] != i:
+                add("warning", f"Hop {i}: узел {key} уже есть в Hop {used_at[key]}; "
+                               "клиент не будет использовать его дважды")
+            else:
+                used_at[key] = i
+            hop_keys.add(key)
+            all_keys.add(key)
+            if url:
+                url_ids.setdefault(url, set()).add(key)
+
+        if not hop_keys:
+            add("error", f"Hop {i}: нет валидных кандидатов")
+
+    if len(hops) <= MAX_HOPS and all_keys and len(all_keys) < len(hops):
+        add("error",
+            f"Невозможно построить цепочку: hop-ов {len(hops)}, "
+            f"а уникальных узлов только {len(all_keys)} "
+            f"({', '.join(sorted(all_keys))})")
+
+    for url, ids in url_ids.items():
+        if len(ids) > 1:
+            add("warning", f"Разные node_id указывают на один URL {url}: "
+                           f"{', '.join(sorted(ids))}; клиент не будет использовать их вместе")
+
+    return issues
+
+
 DEFAULT_PRIVATE = [
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
     "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
@@ -179,50 +262,141 @@ class SplitRouter:
                     self.routes[str(name)] = route.get("hops") or []
         self._rr: dict[str, int] = {}
         self._warned_multi = False
+        # Явно сообщаем о проблемных маршрутах при старте клиента.
+        self.validation: dict[str, list[dict]] = {}
+        for name, hops in self.routes.items():
+            issues = validate_route_hops(hops, set(self.node_urls), self.node_urls)
+            self.validation[str(name)] = issues
+            for issue in issues:
+                log = logger.error if issue.get("level") == "error" else logger.warning
+                log("route %r: %s", name, issue.get("message"))
 
     def _route_hops(self, route_name: str, available: Optional[set[str]]):
-        """Возвращает [ (node_id, url), ... ] с выбором кандидатов по стратегии."""
+        """Возвращает [ (node_id, url), ... ] с выбором кандидатов по стратегии.
+
+        Цепочка выбирается целиком: клиент не допускает повтор одного и того
+        же узла (node_id или URL) на разных hop-ах. Если различных узлов
+        меньше, чем hop-ов, используется самый длинный валидный префикс.
+        """
         hops = self.routes.get(route_name) or []
         if not hops:
+            logger.error("route %r: no hops defined", route_name)
             return []
-        resolved = []
-        for i, hop in enumerate(hops):
+        if len(hops) > MAX_HOPS:
+            logger.warning("route %r has %d hops; max is %d, using first %d",
+                           route_name, len(hops), MAX_HOPS, MAX_HOPS)
+            hops = hops[:MAX_HOPS]
+
+        pools: list[list[tuple[str, str]]] = []
+        strategies: list[str] = []
+        for i, hop in enumerate(hops, 1):
             candidates = []
+            seen: set[str] = set()
             for cand in hop.get("candidates") or []:
-                cand = str(cand)
+                cand = str(cand).strip()
+                if not cand:
+                    continue
                 if cand.startswith("http://") or cand.startswith("https://"):
                     url = cand.rstrip("/")
                     node_id = self.url_nodes.get(url, "")
                 else:
                     node_id = cand
                     url = self.node_urls.get(cand, "")
-                if url:
-                    candidates.append((node_id, url))
+                if not url:
+                    logger.warning("route %r: hop %d candidate %r has no URL, skipped",
+                                   route_name, i, cand)
+                    continue
+                key = node_id or url
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append((node_id, url))
             if not candidates:
                 candidates = [(self.url_nodes.get(u, ""), u) for u in self.fallback_urls]
             if not candidates:
+                logger.error("route %r: hop %d has no usable candidates", route_name, i)
                 return []
-            strategy = str(hop.get("strategy", "round")).lower()
-            resolved.append(self._pick_pair(f"{route_name}:{i}", candidates, strategy, available))
-        return resolved
+            pools.append(candidates)
+            strategies.append(str(hop.get("strategy", "round")).lower())
 
-    def _pick_pair(self, key: str, pairs: list[tuple[str, str]], strategy: str,
-                   available: Optional[set[str]]) -> tuple[str, str]:
-        pool = [p for p in pairs if not available or p[1] in available]
-        if not pool:
-            pool = pairs
-        if strategy == "random":
-            return random.choice(pool)
-        idx = self._rr.get(key, 0)
-        self._rr[key] = idx + 1
-        return pool[idx % len(pool)]
+        chain = self._pick_chain(route_name, pools, strategies, available)
+        if not chain:
+            logger.error("route %r: cannot build a chain without repeating nodes", route_name)
+        return chain
+
+    def _pick_chain(self, route_name: str, pools: list[list[tuple[str, str]]],
+                    strategies: list[str], available: Optional[set[str]]
+                    ) -> list[tuple[str, str]]:
+        """Выбирает цепочку без повторяющихся node_id/URL с backtracking."""
+        filtered: list[list[tuple[str, str]]] = []
+        for pool in pools:
+            usable = [pair for pair in pool if not available or pair[1] in available]
+            filtered.append(usable or list(pool))
+
+        requested = len(filtered)
+        limit = min(requested, MAX_HOPS)
+        for length in range(limit, 0, -1):
+            chain = self._search_chain(route_name, filtered, strategies, length)
+            if not chain:
+                continue
+            for i in range(length):
+                if strategies[i] != "random" and filtered[i]:
+                    key = f"{route_name}:{i}"
+                    self._rr[key] = (self._rr.get(key, 0) + 1) % len(filtered[i])
+            if length < requested:
+                logger.warning(
+                    "route %r: using %d hop(s) instead of %d — not enough distinct nodes",
+                    route_name, length, requested,
+                )
+            return chain
+        return []
+
+    def _search_chain(self, route_name: str, pools: list[list[tuple[str, str]]],
+                      strategies: list[str], length: int
+                      ) -> list[tuple[str, str]]:
+        used_ids: set[str] = set()
+        used_urls: set[str] = set()
+        chosen: list[tuple[str, str]] = []
+
+        def dfs(i: int):
+            if i == length:
+                return list(chosen)
+            pool = pools[i]
+            size = len(pool)
+            if strategies[i] == "random":
+                order = list(range(size))
+                random.shuffle(order)
+            else:
+                start = self._rr.get(f"{route_name}:{i}", 0) % size
+                order = [(start + k) % size for k in range(size)]
+            for pos in order:
+                node_id, url = pool[pos]
+                key = node_id or url
+                if key in used_ids or (url and url in used_urls):
+                    continue
+                used_ids.add(key)
+                if url:
+                    used_urls.add(url)
+                chosen.append((node_id, url))
+                result = dfs(i + 1)
+                if result is not None:
+                    return result
+                chosen.pop()
+                used_ids.discard(key)
+                if url:
+                    used_urls.discard(url)
+            return None
+
+        return dfs(0) or []
 
     def route_for(self, host: str, available: Optional[set[str]] = None
-                  ) -> tuple[str, Optional[str], tuple[str, ...], Optional[str]]:
-        """Возвращает (mode, entry_url, route_ids, category).
+                  ) -> tuple:
+        """Возвращает (mode, entry_url, route_ids, category[, reason]).
 
-        mode = tunnel | direct. route_ids пуст для direct и односкачковых
-        маршрутов; для relay содержит полную цепочку node_id.
+        mode = tunnel | direct | error.
+        route_ids пуст для direct и односкачковых маршрутов; для relay
+        содержит полную цепочку node_id. В режиме error пятый элемент —
+        причина, которую клиент пишет в лог и отдаёт SOCKS-ошибку.
         """
         if not self.enabled:
             return "tunnel", None, (), None
@@ -235,13 +409,13 @@ class SplitRouter:
             return "tunnel", None, (), category
         hops = self._route_hops(route_name, available)
         if not hops:
-            return "tunnel", None, (), category
+            reason = (f"route {route_name!r} cannot be built "
+                      f"(недостаточно разных доступных узлов)")
+            logger.error("%s for host %s", reason, host)
+            return "error", None, (), category, reason
         entry_url = hops[0][1]
         if len(hops) == 1:
             return "tunnel", entry_url, (), category
-        if len(hops) > 3:
-            logger.warning("route %r has %d hops; max is 3, using first 3", route_name, len(hops))
-            hops = hops[:3]
         if any(not nid for nid, _ in hops):
             logger.warning("route %r has hops without node_id; relay disabled, using exit URL",
                            route_name)

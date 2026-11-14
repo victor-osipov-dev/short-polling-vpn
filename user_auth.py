@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional
 
@@ -14,6 +15,8 @@ try:
     from .store import Store
 except ImportError:  # запуск из корня проекта
     from admin.store import Store
+
+logger = logging.getLogger("vpn-user-auth")
 
 
 class UserAuth:
@@ -38,7 +41,15 @@ class UserAuth:
         now = time.monotonic()
         if now - self._seen.get(key, 0.0) < 60:
             return True, "ok"
-        ok, reason = self.store.register_device(user_uuid, device_id, name, ip)
+        try:
+            ok, reason = self.store.register_device(user_uuid, device_id, name, ip)
+        except Exception as exc:
+            # SQLite может быть занят admin-панелью/репликацией. Пользователь
+            # уже прошёл authenticate() перед этим вызовом, поэтому рабочий
+            # туннель рвать нельзя: считаем устройство известным до минуты.
+            logger.warning("touch_device(%s/%s) failed: %s", user_uuid, device_id, exc)
+            self._seen[key] = now
+            return True, "ok"
         if ok:
             self._seen[key] = now
         return ok, reason

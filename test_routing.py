@@ -1,6 +1,6 @@
 import unittest
 
-from split_routing import Ruleset, SplitRouter
+from split_routing import Ruleset, SplitRouter, validate_route_hops
 from subscription import apply_subscription
 
 
@@ -75,6 +75,101 @@ class SplitRouterTest(unittest.TestCase):
         cfg["split_routing"] = dict(cfg["split_routing"], enabled=False)
         router = SplitRouter(cfg)
         self.assertEqual(router.route_for("yandex.ru"), ("tunnel", None, (), None))
+
+    def test_round_avoids_duplicate_nodes(self):
+        cfg = dict(self.cfg)
+        cfg["routes"] = [{
+            "name": "CHAIN",
+            "hops": [
+                {"candidates": ["ru-1", "eu-1"]},
+                {"candidates": ["ru-1", "eu-1"]},
+            ],
+        }]
+        cfg["split_routing"] = dict(cfg["split_routing"],
+                                    actions={"non_ru": {"route": "CHAIN"}})
+        router = SplitRouter(cfg)
+        seen = []
+        for _ in range(4):
+            _, _, ids, _ = router.route_for("google.com")
+            self.assertEqual(len(ids), len(set(ids)))
+            seen.append(ids)
+        self.assertIn(("ru-1", "eu-1"), seen)
+        self.assertIn(("eu-1", "ru-1"), seen)
+
+    def test_random_avoids_duplicate_nodes(self):
+        cfg = dict(self.cfg)
+        cfg["routes"] = [{
+            "name": "CHAIN",
+            "hops": [
+                {"candidates": ["ru-1", "eu-1"], "strategy": "random"},
+                {"candidates": ["ru-1", "eu-1"], "strategy": "random"},
+            ],
+        }]
+        cfg["split_routing"] = dict(cfg["split_routing"],
+                                    actions={"non_ru": {"route": "CHAIN"}})
+        router = SplitRouter(cfg)
+        for _ in range(100):
+            _, _, ids, _ = router.route_for("google.com")
+            self.assertEqual(len(ids), 2)
+            self.assertEqual(len(set(ids)), 2)
+
+    def test_backtracking_skips_entry_needed_as_exit(self):
+        cfg = dict(self.cfg)
+        cfg["routes"] = [{
+            "name": "CHAIN",
+            "hops": [
+                {"candidates": ["ru-1", "eu-1"]},
+                {"candidates": ["ru-1"]},
+            ],
+        }]
+        cfg["split_routing"] = dict(cfg["split_routing"],
+                                    actions={"non_ru": {"route": "CHAIN"}})
+        router = SplitRouter(cfg)
+        self.assertEqual(router.route_for("google.com"), ("tunnel", "https://eu",
+                                                          ("eu-1", "ru-1"), "non_ru"))
+
+    def test_impossible_chain_is_shortened_with_warning(self):
+        cfg = dict(self.cfg)
+        cfg["routes"] = [{
+            "name": "CHAIN",
+            "hops": [{"candidates": ["ru-1"]}, {"candidates": ["ru-1"]}],
+        }]
+        cfg["split_routing"] = dict(cfg["split_routing"],
+                                    actions={"non_ru": {"route": "CHAIN"}})
+        router = SplitRouter(cfg)
+        self.assertEqual(router.route_for("google.com"),
+                         ("tunnel", "https://ru", (), "non_ru"))
+
+    def test_route_validation(self):
+        nodes = {"ru-1": "https://ru", "eu-1": "https://eu"}
+        issues = validate_route_hops(
+            [{"candidates": ["ru-1", "eu-1"]}, {"candidates": ["ru-1", "eu-1"]}],
+            set(nodes), nodes,
+        )
+        self.assertTrue(any(i["level"] == "warning" for i in issues))
+        self.assertFalse(any(i["level"] == "error" for i in issues))
+
+        issues = validate_route_hops(
+            [{"candidates": ["ru-1"]}, {"candidates": ["ru-1"]}],
+            set(nodes), nodes,
+        )
+        self.assertTrue(any(i["level"] == "error" for i in issues))
+
+        issues = validate_route_hops(
+            [{"candidates": ["unknown"]}], set(nodes), nodes,
+        )
+        self.assertTrue(any(i["level"] == "error" for i in issues))
+
+    def test_route_error_when_no_candidates(self):
+        cfg = dict(self.cfg)
+        cfg["client"] = {"server_urls": []}
+        cfg["routes"] = [{"name": "CHAIN", "hops": [{"candidates": ["missing"]}]}]
+        cfg["split_routing"] = dict(cfg["split_routing"],
+                                    actions={"non_ru": {"route": "CHAIN"}})
+        router = SplitRouter(cfg)
+        route = router.route_for("google.com")
+        self.assertEqual(route[0], "error")
+        self.assertIn("CHAIN", route[4])
 
 
 class SubscriptionTest(unittest.TestCase):

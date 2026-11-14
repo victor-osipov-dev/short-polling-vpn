@@ -936,8 +936,20 @@ async def handle_socks_client(tunnel, reader, writer):
         route = tunnel.route_for(host)
     except Exception as exc:
         tunnel.log(f"route_for({host}) failed: {exc}")
+        route = ("error", None, (), None, f"route selection failed: {exc}")
     if route[0] == "direct":
         await _handle_direct(tunnel, reader, writer, host, port)
+        return
+
+    if route[0] == "error":
+        reason = route[4] if len(route) > 4 else "route unavailable"
+        tunnel.log(f"SOCKS CONNECT {host}:{port} rejected: {reason}")
+        try:
+            writer.write(bytes([SOCKS_VERSION, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+            await writer.drain()
+        except Exception:
+            pass
+        writer.close()
         return
 
     try:
