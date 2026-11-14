@@ -59,6 +59,17 @@ class SplitRouterTest(unittest.TestCase):
         self.assertEqual(self.router.route_for("google.com"), ("tunnel", "https://eu", (), "non_ru"))
         self.assertEqual(self.router.route_for("192.168.1.1")[0], "direct")
 
+    def test_top_level_routes_catalog(self):
+        cfg = dict(self.cfg)
+        cfg.pop("profiles")
+        cfg["routes"] = [
+            {"name": "RU", "hops": [{"candidates": ["ru-1"]}]},
+            {"name": "EU", "hops": [{"candidates": ["eu-1"]}]},
+        ]
+        router = SplitRouter(cfg)
+        self.assertEqual(router.route_for("yandex.ru"), ("tunnel", "https://ru", (), "ru"))
+        self.assertEqual(router.route_for("google.com"), ("tunnel", "https://eu", (), "non_ru"))
+
     def test_disabled(self):
         cfg = dict(self.cfg)
         cfg["split_routing"] = dict(cfg["split_routing"], enabled=False)
@@ -73,6 +84,7 @@ class SubscriptionTest(unittest.TestCase):
             "user": {"uuid": "u-1", "secret": "secret"},
             "nodes": [{"id": "ru-1", "url": "https://ru"}],
             "profiles": [{"name": "P", "routes": []}],
+            "routes": [{"name": "RU", "hops": [{"candidates": ["ru-1"]}]}],
             "split_routing": {"enabled": True},
             "subscription": {"auto_update_hours": 6},
         }
@@ -80,6 +92,7 @@ class SubscriptionTest(unittest.TestCase):
         self.assertEqual(cfg["user"]["uuid"], "u-1")
         self.assertEqual(cfg["user"]["device_id"], "dev-1")
         self.assertEqual(cfg["client"]["server_urls"], ["https://ru"])
+        self.assertEqual(cfg["routes"][0]["name"], "RU")
         self.assertTrue(cfg["split_routing"]["enabled"])
 
     def test_routing_override(self):

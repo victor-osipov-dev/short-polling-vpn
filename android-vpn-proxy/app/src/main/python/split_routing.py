@@ -166,10 +166,17 @@ class SplitRouter:
         # Если узлы не в подписке — используем server_urls как кандидатов по порядку.
         self.fallback_urls = list(cfg.get("client", {}).get("server_urls") or [])
         self.routes: dict[str, list[dict]] = {}
+        # Новый формат: каталог маршрутов из конструктора админки.
+        for route in cfg.get("routes") or []:
+            name = route.get("name")
+            if name:
+                self.routes[str(name)] = route.get("hops") or []
+        # Старый формат: profiles[].routes (не перетирает новые определения).
         for profile in cfg.get("profiles") or []:
             for route in profile.get("routes") or []:
-                if route.get("name"):
-                    self.routes[str(route["name"])] = route.get("hops") or []
+                name = route.get("name")
+                if name and str(name) not in self.routes:
+                    self.routes[str(name)] = route.get("hops") or []
         self._rr: dict[str, int] = {}
         self._warned_multi = False
 

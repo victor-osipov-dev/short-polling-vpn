@@ -42,6 +42,10 @@ data class ProxyConfig(
     val routeNonRu: String = "",
     val routePrivate: String = "direct",
     val routingOptions: String = "",
+    // JSON-массивы из подписки: узлы и каталог маршрутов конструктора.
+    // Нужны Python-движку, чтобы имя маршрута превращалось в цепочку URL.
+    val nodesJson: String = "",
+    val routesJson: String = "",
 ) {
     fun effectiveServerUrls(): List<String> =
         if (serverUrls.isNotEmpty()) serverUrls else listOf(serverUrl)
@@ -70,6 +74,12 @@ data class ProxyConfig(
                 put("private", routePrivate)
             })
             if (routingOptions.isNotBlank()) put("routing_options", routingOptions)
+            if (nodesJson.isNotBlank()) {
+                runCatching { put("nodes", JSONArray(nodesJson)) }
+            }
+            if (routesJson.isNotBlank()) {
+                runCatching { put("routes", JSONArray(routesJson)) }
+            }
             put("client", JSONObject().apply {
                 put("socks5", JSONObject().apply {
                     put("bind_host", socksBindHost)
@@ -165,6 +175,8 @@ data class ProxyConfig(
                 routeNonRu = routing.optString("non_ru", defaults.routeNonRu),
                 routePrivate = routing.optString("private", defaults.routePrivate),
                 routingOptions = obj.optString("routing_options", defaults.routingOptions),
+                nodesJson = obj.optJSONArray("nodes")?.toString() ?: defaults.nodesJson,
+                routesJson = obj.optJSONArray("routes")?.toString() ?: defaults.routesJson,
             )
         }
     }
@@ -358,6 +370,8 @@ class ConfigManager(private val context: Context) {
                 deviceId = (existing?.config ?: base).deviceId,
                 serverUrl = (existing?.config ?: base).serverUrl,
                 serverUrls = (existing?.config ?: base).serverUrls,
+                nodesJson = (existing?.config ?: base).nodesJson,
+                routesJson = (existing?.config ?: base).routesJson,
             )
             val profile = VpnProfile(
                 id = localId,
@@ -414,14 +428,26 @@ class ConfigManager(private val context: Context) {
         }
         val profilesArr = sub.optJSONArray("profiles") ?: JSONArray()
         val clientProfilesArr = sub.optJSONArray("client_profiles") ?: JSONArray()
-        val routeNames = mutableListOf<String>()
+        val routesArr = sub.optJSONArray("routes") ?: JSONArray()
+        val canonicalRoutes = JSONArray()
+        val seenRoutes = mutableSetOf<String>()
+        fun addRoute(o: JSONObject?) {
+            if (o == null) return
+            val n = o.optString("name", "")
+            if (n.isBlank() || !seenRoutes.add(n)) return
+            canonicalRoutes.put(JSONObject().apply {
+                put("name", n)
+                put("hops", o.optJSONArray("hops") ?: JSONArray())
+            })
+        }
+        // Новый формат: отдельный каталог маршрутов из конструктора админки.
+        for (i in 0 until routesArr.length()) addRoute(routesArr.optJSONObject(i))
+        // Старый формат: profiles[].routes.
         for (i in 0 until profilesArr.length()) {
             val routes = profilesArr.optJSONObject(i)?.optJSONArray("routes") ?: continue
-            for (j in 0 until routes.length()) {
-                val n = routes.optJSONObject(j)?.optString("name", "") ?: ""
-                if (n.isNotBlank()) routeNames.add(n)
-            }
+            for (j in 0 until routes.length()) addRoute(routes.optJSONObject(j))
         }
+        val routeNames = seenRoutes.toList()
         val split = sub.optJSONObject("split_routing") ?: JSONObject()
         val actions = split.optJSONObject("actions") ?: JSONObject()
         fun action(name: String): String {
@@ -463,6 +489,8 @@ class ConfigManager(private val context: Context) {
                     deviceId = deviceId,
                     serverUrl = nodeUrls.firstOrNull() ?: base.serverUrl,
                     serverUrls = nodeUrls.ifEmpty { base.serverUrls },
+                    nodesJson = nodes.toString(),
+                    routesJson = canonicalRoutes.toString(),
                     routingEnabled = cp.splitEnabled,
                     routingOptions = if (routeNames.isNotEmpty())
                         routeNames.distinct().joinToString("|") else base.routingOptions,
@@ -495,6 +523,8 @@ class ConfigManager(private val context: Context) {
             deviceId = deviceId,
             serverUrl = nodeUrls.firstOrNull() ?: base.serverUrl,
             serverUrls = nodeUrls.ifEmpty { base.serverUrls },
+            nodesJson = nodes.toString(),
+            routesJson = canonicalRoutes.toString(),
             routingEnabled = split.optBoolean("enabled", false) || base.routingEnabled,
             routingOptions = if (routeNames.isNotEmpty())
                 routeNames.distinct().joinToString("|") else base.routingOptions,

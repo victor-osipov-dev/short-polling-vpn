@@ -53,6 +53,10 @@ def apply_subscription(cfg: dict, sub: dict) -> dict:
         client["server_urls"] = urls
         client["server_url"] = urls[0]
     cfg["nodes"] = nodes
+    # Новый формат: отдельный каталог маршрутов (может быть любой длины).
+    # Он приоритетнее старого profiles[].routes.
+    if sub.get("routes"):
+        cfg["routes"] = sub["routes"]
     if sub.get("profiles"):
         cfg["profiles"] = sub["profiles"]
     if sub.get("split_routing"):
