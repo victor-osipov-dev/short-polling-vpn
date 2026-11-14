@@ -180,12 +180,12 @@ CREATE TABLE audit_log (
   },
   "nodes": [
     {"id": "ru-2", "name": "RU exit", "url": "https://fimdi.ru:8443", "region": "RU"},
-    {"id": "ru-1", "name": "FI exit", "url": "https://177.3.220.12:8443", "region": "FI"},
+    {"id": "fi-1", "name": "FI exit", "url": "https://177.3.220.12:8443", "region": "FI"},
     {"id": "de-1", "name": "DE exit", "url": "https://2.27.37.211:8443", "region": "DE"}
   ],
   "routes": [
     {"name": "RU exit", "hops": [{"candidates": ["ru-2"], "strategy": "round"}]},
-    {"name": "FI exit", "hops": [{"candidates": ["ru-1"], "strategy": "round"}]},
+    {"name": "FI exit", "hops": [{"candidates": ["fi-1"], "strategy": "round"}]},
     {"name": "DE exit", "hops": [{"candidates": ["de-1"], "strategy": "round"}]},
     {"name": "RU -> DE", "hops": [
       {"candidates": ["ru-2"], "strategy": "round"},
@@ -199,7 +199,7 @@ CREATE TABLE audit_log (
         {
           "name": "via RU",
           "hops": [
-            {"candidates": ["ru-1"], "transport": "direct"},
+            {"candidates": ["ru-2"], "transport": "direct"},
             {"candidates": ["de-1"], "strategy": "round"}
           ]
         }
@@ -739,7 +739,8 @@ GET /rules/latest             -> latest version metadata + URL
 - Android UI: в Settings → Connection поле **Subscription URL** и кнопка «Загрузить» (user/узлы сохраняются; маршруты и split-routing применяются при подключении).
 - Панель: страница **Узлы** (subscription.nodes, пиры, файлы правил, node_id/public_key), страница **Маршруты** (конструктор цепочек из 1–3 hop-ов) и **Профили** (route_ru/route_non_ru/route_private выбираются из маршрутов).
 - Тесты: 15 (хранилище, панель, репликация, auth, split-routing, subscription).
-- **Задеплоено** на `157.228.134.211` (ru-2, домен `fimdi.ru`), `177.3.220.12` (ru-1, FI) и `2.27.37.211` (de-1): VPN 8443, admin 127.0.0.1:8444, репликация, подписки, правила, split-routing, relay-цепочка RU→DE.
+- **Задеплоено** на `157.228.134.211` (ru-2, домен `fimdi.ru`), `177.3.220.12` (fi-1, FI) и `2.27.37.211` (de-1): VPN 8443, admin 127.0.0.1:8444, репликация, подписки, правила, split-routing, relay-цепочка FI→DE.
+- Исторический `node_id` `ru-1` переименован в `fi-1`; исходные op-логи переподписаны ключом узла, резервные копии БД и конфигов лежат рядом с `*.bak.rename-*`.
 
 ### Проверено вживую
 

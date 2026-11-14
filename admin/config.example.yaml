@@ -3,11 +3,11 @@
 
 db_path: admin/data/vpn.db
 cluster_key: admin/data/cluster.key
-node_id: ru-1
+node_id: fi-1
 node_key: admin/data/node.key
 
 # Мастера, между которыми реплицируется БД. public_key — вывод:
-#   python -c "from admin.store import Store; print(Store('admin/data/vpn.db','admin/data/cluster.key','ru-1').node_public_key())"
+#   python -c "from admin.store import Store; print(Store('admin/data/vpn.db','admin/data/cluster.key','fi-1').node_public_key())"
 peers: []
 replication_interval: 60
 
@@ -41,10 +41,14 @@ rules_dir: admin/data/rules
 subscription:
   auto_update_hours: 6
   nodes:
-    - id: ru-1
+    - id: ru-2
       name: "RU exit"
-      url: https://177.3.220.12:8443
+      url: https://fimdi.ru:8443
       region: RU
+    - id: fi-1
+      name: "FI exit"
+      url: https://177.3.220.12:8443
+      region: FI
     - id: de-1
       name: "DE exit"
       url: https://2.27.37.211:8443
@@ -54,7 +58,10 @@ subscription:
       routes:
         - name: "RU exit"
           hops:
-            - candidates: ["ru-1"]
+            - candidates: ["ru-2"]
+        - name: "FI exit"
+          hops:
+            - candidates: ["fi-1"]
         - name: "EU exits"
           hops:
             - candidates: ["de-1"]

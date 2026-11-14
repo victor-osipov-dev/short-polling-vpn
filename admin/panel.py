@@ -655,8 +655,8 @@ class Handler(BaseHTTPRequestHandler):
 <label>Заметка</label><input name="note">
 <label>Действует до (UTC, необязательно)</label><input name="expires" type="date">
 <label>Лимит устройств (0 = без лимита)</label><input name="max_devices" type="number" min="0" value="0">
-<label>Видимые узлы (через запятую, пусто = все)</label><input name="visible_nodes" placeholder="ru-1, de-1">
-<label>Разрешённые hop-ы (пусто = все)</label><input name="allowed_hops" placeholder="ru-1, de-1">
+<label>Видимые узлы (через запятую, пусто = все)</label><input name="visible_nodes" placeholder="ru-2, fi-1, de-1">
+<label>Разрешённые hop-ы (пусто = все)</label><input name="allowed_hops" placeholder="ru-2, fi-1, de-1">
 <label>Разрешённые exit-ы (пусто = все)</label><input name="allowed_exits" placeholder="de-1">
 <div style="margin-top:16px"><button type="submit">Создать</button>
 <a class="btn secondary" href="/users">Отмена</a></div>
@@ -926,7 +926,7 @@ function removeHop() {{
 <input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
 <input type="hidden" name="hops_count" value="1">
 <label>Название</label><input name="name" required>
-<label>Hop 1 — кандидаты (node_id через запятую)</label><input name="hop_candidates_0" placeholder="ru-1">
+<label>Hop 1 — кандидаты (node_id через запятую)</label><input name="hop_candidates_0" placeholder="ru-2">
 <label>Стратегия</label><select name="hop_strategy_0"><option>round</option><option>random</option></select>
 <div style="margin-top:12px"><button type="submit">Создать маршрут</button></div>
 </form>

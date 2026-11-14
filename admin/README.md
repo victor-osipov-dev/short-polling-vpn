@@ -154,9 +154,10 @@ users:
 На VPN-серверах, которые будут entry/relay:
 
 ```yaml
-node_id: "ru-1"
+node_id: "fi-1"
 relay_secret: "общий-секрет-на-всех-узлах"
 peers:
+  ru-2: "https://fimdi.ru:8443"
   de-1: "https://2.27.37.211:8443"
 ```
 
@@ -164,9 +165,9 @@ peers:
 
 ```yaml
 routes:
-  - name: "RU → DE"
+  - name: "FI → DE"
     hops:
-      - candidates: ["ru-1"]
+      - candidates: ["fi-1"]
       - candidates: ["de-1"]
 ```
 
@@ -175,8 +176,8 @@ Payload на entry/relay не расшифровывается. Максимум
 
 ## Текущий деплой (2026-11-14)
 
-- `ru-1` — `177.3.220.12`, `de-1` — `2.27.37.211`.
-- На обоих: `short-polling-vpn` (8443) и `vpn-admin` (127.0.0.1:8444), автозапуск включён.
+- `ru-2` — `157.228.134.211` (`fimdi.ru`, RU), `fi-1` — `177.3.220.12` (FI), `de-1` — `2.27.37.211` (DE).
+- На всех трёх: `short-polling-vpn` (8443) и `vpn-admin` (127.0.0.1:8444), автозапуск включён.
 - Репликация пользователей между мастерами работает (проверено create/disable/enable).
 - Публичные `/sub/<token>`, `/rules/<name>`, `/replicate/ops` — через 8443.
 - Вход в панель:
