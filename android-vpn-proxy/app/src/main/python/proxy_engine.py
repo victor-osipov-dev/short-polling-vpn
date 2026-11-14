@@ -679,6 +679,14 @@ class ClientTunnel:
                     self.log(f"poll HTTP {resp.status_code} from {url_base}")
                     await self._handle_base_failure(url_base, f"HTTP {resp.status_code}", bool(frames_to_send))
                     return
+                ctype = resp.headers.get("Content-Type", "").lower()
+                if "octet-stream" not in ctype:
+                    self._mark_failure(url_base)
+                    self.log(f"unexpected response from {url_base} ({ctype or 'no content-type'}); "
+                             f"check user/device/route")
+                    await self._handle_base_failure(url_base, "unexpected content-type",
+                                                    bool(frames_to_send))
+                    return
                 self._mark_success(url_base)
                 await self._handle_stream_response(resp)
         except Exception as e:
@@ -758,7 +766,7 @@ class ClientTunnel:
                     incoming_batch = decrypt(self.enc_key, body)
                     incoming_frames = unpack_frames(incoming_batch)
                 except Exception as e:
-                    logger.error(f"decrypt/unpack error: {e}")
+                    logger.error(f"decrypt/unpack error: {e!r}")
                 else:
                     for f in incoming_frames:
                         reply = await self._dispatch_single_frame(f)

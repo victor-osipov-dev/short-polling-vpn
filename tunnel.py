@@ -514,6 +514,16 @@ class ClientTunnel:
                     logger.error("poll HTTP %s from %s", resp.status_code, url_base)
                     await self._handle_base_failure(url_base, f"HTTP {resp.status_code}", bool(frames_to_send))
                     return
+                ctype = resp.headers.get("Content-Type", "").lower()
+                if "octet-stream" not in ctype:
+                    # Маскировочный ответ сервера (fake 200). Обычно значит
+                    # неверный user/device, лимит устройств или маршрут.
+                    self._mark_failure(url_base)
+                    logger.warning("unexpected response from %s (%s); check user/device/route",
+                                   url_base, ctype or "no content-type")
+                    await self._handle_base_failure(url_base, "unexpected content-type",
+                                                    bool(frames_to_send))
+                    return
                 self._mark_success(url_base)
                 await self._handle_stream_response(resp)
         except Exception as e:
@@ -592,7 +602,7 @@ class ClientTunnel:
                     incoming_batch = decrypt(self.enc_key, body)
                     incoming_frames = unpack_frames(incoming_batch)
                 except Exception as e:
-                    logger.error("decrypt/unpack error: %s", e)
+                    logger.error("decrypt/unpack error: %r", e)
                 else:
                     for f in incoming_frames:
                         reply = await self._dispatch_single_frame(f)
