@@ -241,12 +241,11 @@ class ConfigManager(private val context: Context) {
 
     fun ensureProfiles(): List<VpnProfile> {
         if (!profilesFile.exists()) {
-            val existing = if (configFile.exists()) parseRaw(configFile.readText()) else null
-            val profile = VpnProfile(name = "Default", config = existing ?: ProxyConfig())
-            saveProfiles(listOf(profile))
-            prefs.edit().putString("active_profile", profile.id).apply()
-            writeEngineConfig(profile)
-            return listOf(profile)
+            // По умолчанию — ноль профилей. Пользователь добавляет подписку
+            // или создаёт профиль сам.
+            saveProfiles(emptyList())
+            prefs.edit().remove("active_profile").apply()
+            return emptyList()
         }
         return loadProfiles()
     }
@@ -269,15 +268,15 @@ class ConfigManager(private val context: Context) {
         profilesFile.writeText(json.toString(2))
     }
 
-    fun getActiveProfile(): VpnProfile {
+    fun getActiveProfile(): VpnProfile? {
         val profiles = loadProfiles()
         val activeId = prefs.getString("active_profile", null)
-        return profiles.firstOrNull { it.id == activeId } ?: profiles.firstOrNull() ?: VpnProfile()
+        return profiles.firstOrNull { it.id == activeId } ?: profiles.firstOrNull()
     }
 
     fun selectProfile(id: String) {
         prefs.edit().putString("active_profile", id).apply()
-        getActiveProfile().let { writeEngineConfig(it) }
+        getActiveProfile()?.let { writeEngineConfig(it) }
     }
 
     fun updateProfile(profile: VpnProfile) {
@@ -285,7 +284,7 @@ class ConfigManager(private val context: Context) {
         val idx = profiles.indexOfFirst { it.id == profile.id }
         if (idx >= 0) profiles[idx] = profile else profiles.add(profile)
         saveProfiles(profiles)
-        if (profile.id == getActiveProfile().id) writeEngineConfig(profile)
+        if (profile.id == getActiveProfile()?.id) writeEngineConfig(profile)
     }
 
     fun addProfile(profile: VpnProfile) {
@@ -296,13 +295,12 @@ class ConfigManager(private val context: Context) {
 
     fun deleteProfile(id: String) {
         val profiles = loadProfiles().toMutableList()
-        if (profiles.size <= 1) return
         profiles.removeAll { it.id == id }
         if (prefs.getString("active_profile", null) == id) {
-            prefs.edit().putString("active_profile", profiles.first().id).apply()
+            prefs.edit().putString("active_profile", profiles.firstOrNull()?.id ?: "").apply()
         }
         saveProfiles(profiles)
-        getActiveProfile().let { writeEngineConfig(it) }
+        profiles.firstOrNull()?.let { writeEngineConfig(it) }
     }
 
     fun writeEngineConfig(profile: VpnProfile) {
@@ -347,7 +345,7 @@ class ConfigManager(private val context: Context) {
             (url.isNotBlank() && it.config.subscriptionUrl == url) ||
                 (uuid.isNotBlank() && it.config.userId == uuid)
         }
-        val base = existing?.config ?: getActiveProfile().config
+        val base = existing?.config ?: getActiveProfile()?.config ?: ProxyConfig()
         val deviceId = base.deviceId.ifBlank { UUID.randomUUID().toString() }
         val updated = base.copy(
             subscriptionUrl = url,
@@ -376,7 +374,7 @@ class ConfigManager(private val context: Context) {
     // ── Legacy API (Simple tab + service) ─────────────────────────────
 
     fun load(): ProxyConfig {
-        val active = getActiveProfile()
+        val active = getActiveProfile() ?: return ProxyConfig()
         val cfg = active.config
         if (cfg.deviceId.isBlank()) {
             val updated = active.copy(config = cfg.copy(deviceId = UUID.randomUUID().toString()))
@@ -388,14 +386,27 @@ class ConfigManager(private val context: Context) {
 
     fun save(config: ProxyConfig) {
         val active = getActiveProfile()
-        updateProfile(active.copy(config = config))
+        if (active != null) {
+            updateProfile(active.copy(config = config))
+        } else {
+            // Профилей нет — создаём первый, чтобы настройки было куда сохранить.
+            val profile = VpnProfile(name = "Default", config = config)
+            addProfile(profile)
+            selectProfile(profile.id)
+        }
     }
 
     fun saveRaw(json: String) {
         configFile.writeText(json)
         parseRaw(json)?.let { parsed ->
             val active = getActiveProfile()
-            updateProfile(active.copy(config = parsed))
+            if (active != null) {
+                updateProfile(active.copy(config = parsed))
+            } else {
+                val profile = VpnProfile(name = "Default", config = parsed)
+                addProfile(profile)
+                selectProfile(profile.id)
+            }
         }
     }
 

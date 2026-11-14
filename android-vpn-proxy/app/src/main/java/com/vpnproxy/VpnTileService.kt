@@ -75,7 +75,7 @@ class VpnTileService : TileService() {
     }
 
     private fun startProxy() {
-        val profile = ConfigManager(applicationContext).getActiveProfile()
+        val profile = ConfigManager(applicationContext).getActiveProfile() ?: return
         if (profile.mode == "vpn" && android.net.VpnService.prepare(this) != null) {
             // Согласие на VPN ещё не дано (или отозвано). Тайл не может открыть
             // Activity для запроса согласия, поэтому делегируем MainActivity,
@@ -100,7 +100,8 @@ class VpnTileService : TileService() {
     private fun setTileState(running: Boolean) {
         val tile = qsTile ?: return
         tile.state = if (running) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.label = getString(if (running) R.string.stop else R.string.start)
+        tile.label = getString(R.string.app_name)
+        tile.icon = android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_tile_vpn)
         tile.updateTile()
     }
 }

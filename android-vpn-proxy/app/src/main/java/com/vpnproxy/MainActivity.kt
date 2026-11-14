@@ -168,7 +168,7 @@ class MainActivity : ComponentActivity() {
     }
 
     fun startProxyWithVpnCheck() {
-        val profile = configManager.getActiveProfile()
+        val profile = configManager.getActiveProfile() ?: return
         if (profile.mode == "vpn") {
             val intent = VpnService.prepare(this)
             if (intent != null) {
@@ -256,11 +256,11 @@ fun MainScreen(
     }
 
     var profiles by remember { mutableStateOf(configManager.loadProfiles()) }
-    var activeId by remember { mutableStateOf(configManager.getActiveProfile().id) }
+    var activeId by remember { mutableStateOf(configManager.getActiveProfile()?.id ?: "") }
 
     fun refreshProfiles() {
         profiles = configManager.loadProfiles()
-        activeId = configManager.getActiveProfile().id
+        activeId = configManager.getActiveProfile()?.id ?: ""
     }
 
     // Возвращаясь с экрана настроек, подхватываем изменения профилей/конфига.
@@ -420,15 +420,6 @@ fun HomeScreen(
                 color = Color.White,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = active?.let {
-                    serverHost(it.config.effectiveServerUrls().firstOrNull() ?: it.config.serverUrl)
-                } ?: "",
-                color = Color.White.copy(alpha = 0.5f),
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
             )
 
             Spacer(Modifier.height(30.dp))
@@ -672,7 +663,7 @@ private fun ProfilesSection(
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "Profiles",
+                tr("Profiles", "Общее"),
                 color = Color.White,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -738,11 +729,7 @@ private fun ProfileCard(profile: VpnProfile, active: Boolean, onClick: () -> Uni
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = (if (profile.mode == "vpn") "VPN" else "Proxy") + " · " +
-                        serverHost(
-                            profile.config.effectiveServerUrls().firstOrNull()
-                                ?: profile.config.serverUrl
-                        ),
+                    text = (if (profile.mode == "vpn") "VPN" else "Proxy"),
                     color = Color.White.copy(alpha = 0.5f),
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -823,25 +810,21 @@ fun SettingsScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
-            LanguageRow()
             TabRow(
                 selectedTabIndex = selectedTab,
                 containerColor = MaterialTheme.colorScheme.surface
             ) {
                 Tab(selected = selectedTab == 0, onClick = { onTabChange(0) },
-                    text = { Text(tr("Profiles", "Профили")) })
+                    text = { Text(tr("General", "Общее")) })
                 Tab(selected = selectedTab == 1, onClick = { onTabChange(1) },
                     text = { Text(tr("Connection", "Подключение")) })
                 Tab(selected = selectedTab == 2, onClick = { onTabChange(2) },
-                    text = { Text(tr("Advanced", "Продвинутое")) })
-                Tab(selected = selectedTab == 3, onClick = { onTabChange(3) },
                     text = { Text(tr("Logs", "Логи")) })
             }
             when (selectedTab) {
                 0 -> ProfilesTab(configManager, installedApps)
                 1 -> SimpleConfigTab(configManager, urlStatus, isRunning, onResetUrlErrors)
-                2 -> RawConfigTab(configManager)
-                3 -> LogTab(logs, autoScroll, { autoScroll = it })
+                2 -> LogTab(logs, autoScroll, { autoScroll = it })
             }
         }
     }
@@ -1007,17 +990,18 @@ fun SimpleConfigTab(
                 .distinct()
             val options = (routeNames + "direct").distinct()
             if (routeNames.isEmpty()) {
-                Text("Загрузите подписку, чтобы получить названия маршрутов.",
+                Text(tr("Load a subscription to get route names.",
+                       "Загрузите подписку, чтобы получить названия маршрутов."),
                      fontSize = 11.sp,
                      color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
             } else {
                 RouteSelector("RU", cfg.routeRu, options) {
                     save(cfg.copy(routeRu = it))
                 }
-                RouteSelector("non-RU", cfg.routeNonRu, options) {
+                RouteSelector(tr("non-RU", "не-RU"), cfg.routeNonRu, options) {
                     save(cfg.copy(routeNonRu = it))
                 }
-                RouteSelector("Private / LAN", cfg.routePrivate, options) {
+                RouteSelector(tr("Private / LAN", "Локальная сеть"), cfg.routePrivate, options) {
                     save(cfg.copy(routePrivate = it))
                 }
             }
@@ -1211,7 +1195,17 @@ fun SimpleConfigTab(
                 keyboardType = KeyboardType.Number
             ) { it.toIntOrNull()?.let { v -> save(cfg.copy(dnsBindPort = v)) } }
         }
+
+        Divider()
+        Text(tr("Advanced config", "Продвинутый конфиг"),
+             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+        RawConfigEditor(configManager)
     }
+}
+
+@Composable
+fun RawConfigEditor(configManager: ConfigManager) {
+    RawConfigTab(configManager, embedded = true)
 }
 
 @Composable
@@ -1294,7 +1288,7 @@ fun UrlStatusSection(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "URL status",
+                    tr("URL status", "Статус URL"),
                     color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f)
@@ -1306,7 +1300,7 @@ fun UrlStatusSection(
 
             if (urls.isEmpty()) {
                 Text(
-                    "No server URLs configured",
+                    tr("No server URLs configured", "URL серверов не настроены"),
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     fontSize = 12.sp
                 )
@@ -1321,19 +1315,19 @@ fun UrlStatusSection(
                 val color: Color
                 when {
                     disabled -> {
-                        label = "Disabled"
+                        label = tr("Disabled", "Отключён")
                         color = Color(0xFF8A93A6)
                     }
                     r?.quarantined == true -> {
-                        label = "Quarantine · ${r.cooldownRemaining}s"
+                        label = tr("Quarantine", "Карантин") + " · ${r.cooldownRemaining}s"
                         color = Color(0xFFFFB74D)
                     }
                     r != null && r.errors > 0 -> {
-                        label = "Active · ${r.errors} error(s)"
+                        label = tr("Active", "Активен") + " · ${r.errors} " + tr("error(s)", "ошиб.")
                         color = Color(0xFFF87171)
                     }
                     else -> {
-                        label = "Active"
+                        label = tr("Active", "Активен")
                         color = Color(0xFF34D399)
                     }
                 }
@@ -1376,8 +1370,8 @@ fun UrlStatusSection(
 @Composable
 fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
     var profiles by remember { mutableStateOf(configManager.loadProfiles()) }
-    var activeId by remember { mutableStateOf(configManager.getActiveProfile().id) }
-    var editing by remember { mutableStateOf(configManager.getActiveProfile()) }
+    var activeId by remember { mutableStateOf(configManager.getActiveProfile()?.id ?: "") }
+    var editing by remember { mutableStateOf(configManager.getActiveProfile() ?: VpnProfile()) }
     var showNameDialog by remember { mutableStateOf(false) }
     var dialogKind by remember { mutableStateOf("new") } // new | rename | duplicate
     var showAppPicker by remember { mutableStateOf(false) }
@@ -1386,8 +1380,8 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
 
     fun refresh() {
         profiles = configManager.loadProfiles()
-        activeId = configManager.getActiveProfile().id
-        editing = configManager.getActiveProfile()
+        activeId = configManager.getActiveProfile()?.id ?: ""
+        editing = configManager.getActiveProfile() ?: VpnProfile()
     }
 
     fun persist(p: VpnProfile) {
@@ -1403,7 +1397,9 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(tr("Profiles", "Профили"), style = MaterialTheme.typography.titleMedium,
+        LanguageRow()
+        Divider()
+        Text(tr("Profiles", "Общее"), style = MaterialTheme.typography.titleMedium,
              color = MaterialTheme.colorScheme.onSurface)
         Text(tr("Each profile stores mode, connection settings and routing. Switch, then Stop/Start to apply.", "Каждый профиль хранит режим, настройки подключения и маршрутизацию. Переключите и перезапустите VPN."),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
@@ -1449,7 +1445,8 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
             AlertDialog(
                 onDismissRequest = { pendingDelete = null },
                 title = { Text(tr("Delete profile", "Удалить профиль")) },
-                text = { Text("Delete \"${doomed.name}\"? This cannot be undone.") },
+                text = { Text(tr("Delete \"${doomed.name}\"? This cannot be undone.",
+                                 "Удалить \"${doomed.name}\"? Это нельзя отменить.")) },
                 confirmButton = {
                     TextButton(onClick = {
                         configManager.deleteProfile(doomed.id)
@@ -1481,6 +1478,11 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
                 modifier = Modifier.weight(1f)
             ) { Text(tr("Duplicate", "Дублировать"), maxLines = 1, fontSize = 12.sp) }
         }
+        Text(
+            tr("Deleting all profiles is allowed; the app can start with none.",
+               "Удалить все профили можно — приложение может работать без профилей."),
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), fontSize = 11.sp
+        )
 
         // Mode selection
         Row(verticalAlignment = Alignment.CenterVertically,
@@ -1504,7 +1506,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
 
         // Routing rules
         Text(tr("Traffic routing:", "Маршрутизация трафика:"), color = MaterialTheme.colorScheme.onSurface)
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             FilterChip(
                 selected = editing.routing.mode == "all",
                 onClick = { persist(editing.copy(routing = editing.routing.copy(mode = "all"))) },
@@ -1528,8 +1530,12 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
             else -> emptyList()
         }
         if (editing.routing.mode == "allow" || editing.routing.mode == "block") {
-            Text(if (editing.routing.mode == "allow") "Apps sent through the tunnel:" else "Apps using direct connection:",
-                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
+            Text(
+                if (editing.routing.mode == "allow")
+                    tr("Apps sent through the tunnel:", "Приложения через туннель:")
+                else tr("Apps using direct connection:", "Приложения напрямую:"),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp
+            )
             Button(onClick = {
                 pickerList = editing.routing.mode
                 showAppPicker = true
@@ -1538,7 +1544,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
                 Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("${rule.appName} (${rule.packageName})", Modifier.weight(1f),
                          color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp)
-                    SmallButton("Remove") {
+                    SmallButton(tr("Remove", "Удалить")) {
                         val updatedRules = activeRules.filterNot { it.packageName == rule.packageName }
                         val newRouting = if (editing.routing.mode == "allow")
                             editing.routing.copy(allowedApps = updatedRules)
@@ -1579,6 +1585,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
                         "new" -> {
                             val p = VpnProfile(name = finalName)
                             configManager.addProfile(p)
+                            configManager.selectProfile(p.id)
                             editing = p
                             profiles = configManager.loadProfiles()
                         }
@@ -1586,6 +1593,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
                         "duplicate" -> {
                             val p = editing.copy(id = java.util.UUID.randomUUID().toString(), name = finalName)
                             configManager.addProfile(p)
+                            configManager.selectProfile(p.id)
                             editing = p
                             profiles = configManager.loadProfiles()
                         }
@@ -1681,7 +1689,7 @@ fun AppPickerDialog(apps: List<AppRule>, onDismiss: () -> Unit, onPick: (AppRule
 // ── Raw JSON config tab ───────────────────────────────────────────────
 
 @Composable
-fun RawConfigTab(configManager: ConfigManager) {
+fun RawConfigTab(configManager: ConfigManager, embedded: Boolean = false) {
     var raw by remember { mutableStateOf(configManager.loadRaw()) }
     var cooldown by remember { mutableStateOf(configManager.load().urlCooldownSeconds.toString()) }
     var failLimit by remember { mutableStateOf(configManager.load().urlFailLimit.toString()) }
@@ -1693,9 +1701,11 @@ fun RawConfigTab(configManager: ConfigManager) {
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
+        modifier = if (embedded) {
+            Modifier.fillMaxWidth()
+        } else {
+            Modifier.fillMaxSize().padding(16.dp)
+        },
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(tr("Edit full config (JSON). Server block is ignored.", "Редактирование полного JSON. Блок server игнорируется."),

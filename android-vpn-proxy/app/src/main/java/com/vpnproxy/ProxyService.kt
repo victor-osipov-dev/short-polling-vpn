@@ -130,7 +130,7 @@ class ProxyService : Service() {
         broadcastState(true)
         startStatusPoller()
 
-        if (ConfigManager(this).getActiveProfile().mode == "vpn") {
+        if (ConfigManager(this).getActiveProfile()?.mode == "vpn") {
             log("Mode is VPN, starting TunService")
             startTunService()
         }

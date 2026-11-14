@@ -57,7 +57,7 @@ class TunService : VpnService() {
     private fun startVpn() {
         if (vpnInterface != null) return
         val profile = ConfigManager(this).getActiveProfile()
-        if (profile.mode != "vpn") {
+        if (profile == null || profile.mode != "vpn") {
             log("Active profile is not in VPN mode")
             stopSelf()
             return
