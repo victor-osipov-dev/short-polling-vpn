@@ -416,8 +416,80 @@ class ConfigManager(private val context: Context) {
         configFile.writeText(profile.config.toPrettyJson())
     }
 
-    /** Импорт подписки: создаёт/обновляет профиль и делает его активным. */
-    fun importSubscription(sub: JSONObject, sourceUrl: String = ""): VpnProfile {
+    /** Нормализованный ключ подписки: URL без завершающего слеша. */
+    fun normalizeSubscriptionUrl(url: String): String = url.trim().trimEnd('/')
+
+    /**
+     * Стабильный короткий идентификатор подписки. Нужен, чтобы профили
+     * разных подписок не сталкивались по id, даже если панель раздаёт
+     * одинаковые id именованных профилей во всех подписках.
+     */
+    private fun subscriptionSlug(url: String, uuid: String): String {
+        val key = when {
+            url.isNotBlank() -> "url:" + normalizeSubscriptionUrl(url)
+            uuid.isNotBlank() -> "user:$uuid"
+            else -> "subscription"
+        }
+        return UUID.nameUUIDFromBytes(key.toByteArray()).toString().take(8)
+    }
+
+    /** Все профили, принадлежащие подписке с указанным URL. */
+    fun profilesOfSubscription(url: String): List<VpnProfile> {
+        val key = normalizeSubscriptionUrl(url)
+        if (key.isBlank()) return emptyList()
+        return loadProfiles().filter {
+            normalizeSubscriptionUrl(it.config.subscriptionUrl) == key
+        }
+    }
+
+    /**
+     * Удаляет только профили одной подписки. Другие подписки и локальные
+     * профили не затрагиваются.
+     */
+    fun deleteSubscription(url: String) {
+        val key = normalizeSubscriptionUrl(url)
+        if (key.isBlank()) return
+        val profiles = loadProfiles()
+        val doomed = profiles.filter {
+            normalizeSubscriptionUrl(it.config.subscriptionUrl) == key
+        }.map { it.id }.toSet()
+        if (doomed.isEmpty()) return
+        val activeId = prefs.getString("active_profile", null)
+        val remaining = profiles.filterNot { it.id in doomed }
+        if (activeId in doomed) {
+            prefs.edit().putString("active_profile", remaining.firstOrNull()?.id ?: "").apply()
+        }
+        saveProfiles(remaining)
+        getActiveProfile()?.let { writeEngineConfig(it) }
+    }
+
+    /** Убирает профили этой подписки, которых больше нет в свежем payload. */
+    private fun pruneSubscription(url: String, keepIds: Set<String>) {
+        val key = normalizeSubscriptionUrl(url)
+        if (key.isBlank()) return
+        val profiles = loadProfiles()
+        val doomed = profiles.filter {
+            normalizeSubscriptionUrl(it.config.subscriptionUrl) == key &&
+                it.id !in keepIds
+        }.map { it.id }.toSet()
+        if (doomed.isEmpty()) return
+        val activeId = prefs.getString("active_profile", null)
+        val remaining = profiles.filterNot { it.id in doomed }
+        if (activeId in doomed) {
+            prefs.edit().putString("active_profile", remaining.firstOrNull()?.id ?: "").apply()
+        }
+        saveProfiles(remaining)
+    }
+
+    /**
+     * Импорт подписки. Каждая подписка получает собственный набор профилей:
+     * повторный импорт обновляет только её и не удаляет остальные подписки.
+     *
+     * @param select сделать первый профиль этой подписки активным
+     *        (для фонового обновления из списка передавайте false).
+     */
+    fun importSubscription(sub: JSONObject, sourceUrl: String = "",
+                           select: Boolean = true): VpnProfile {
         val user = sub.optJSONObject("user") ?: JSONObject()
         val uuid = user.optString("uuid", "")
         val secret = user.optString("secret", "")
@@ -463,28 +535,54 @@ class ConfigManager(private val context: Context) {
             url.removePrefix("https://").removePrefix("http://")
                 .substringBefore("/").ifBlank { "Subscription" }
         }
-        val existing = loadProfiles().firstOrNull {
-            (url.isNotBlank() && it.config.subscriptionUrl == url) ||
-                (uuid.isNotBlank() && it.config.userId == uuid)
+        val normalizedUrl = normalizeSubscriptionUrl(url)
+        val allProfiles = loadProfiles()
+        // Одна и та же подписка узнаётся по URL. По user uuid — только
+        // если URL вообще не пришёл (иначе разные подписки одного
+        // пользователя схлопнулись бы в одну).
+        val existing = allProfiles.firstOrNull {
+            normalizedUrl.isNotBlank() &&
+                normalizeSubscriptionUrl(it.config.subscriptionUrl) == normalizedUrl
+        } ?: allProfiles.firstOrNull {
+            normalizedUrl.isBlank() && uuid.isNotBlank() && it.config.userId == uuid
         }
         val base = existing?.config ?: getActiveProfile()?.config ?: ProxyConfig()
-        val deviceId = base.deviceId.ifBlank { UUID.randomUUID().toString() }
+        // device_id уникален для подписки: иначе два разных пользователя
+        // на одном сервере конфликтовали бы как "device owner mismatch".
+        val deviceId = existing?.config?.deviceId?.takeIf { it.isNotBlank() }
+            ?: UUID.randomUUID().toString()
+        val slug = subscriptionSlug(url, uuid)
 
         // client_profiles: несколько профилей в одной подписке.
-        if (clientProfilesArr.length() > 0) {
-            val defs = (0 until clientProfilesArr.length()).mapNotNull { i ->
+        val defs = if (clientProfilesArr.length() > 0) {
+            (0 until clientProfilesArr.length()).mapNotNull { i ->
                 clientProfilesArr.optJSONObject(i)?.let { ClientProfileDef.fromJson(it) }
             }.filter { it.enabled }
-            // Сохраняем определения, чтобы их можно было редактировать в приложении.
+        } else emptyList()
+        if (defs.isNotEmpty()) {
+            // Определения именованных профилей — отдельно для каждой подписки,
+            // чтобы импорт второй подписки не затирал первую.
             prefs.edit().putString(
-                "client_profiles",
+                "client_profiles:$slug",
                 JSONArray().apply { defs.forEach { put(it.toJson()) } }.toString()
             ).apply()
             val imported = mutableListOf<VpnProfile>()
+            val keepIds = mutableSetOf<String>()
             for (cp in defs) {
                 val cpId = cp.id.ifBlank { UUID.randomUUID().toString() }
+                val localId = "sub:$slug:$cpId"
+                // Старые версии использовали id "sub:<cpId>" без привязки
+                // к подписке. Узнаём такой профиль по URL + имени и
+                // переиспользуем его id (не плодим дубликаты).
+                val existingProfile = allProfiles.firstOrNull { it.id == localId }
+                    ?: allProfiles.firstOrNull {
+                        normalizedUrl.isNotBlank() &&
+                            normalizeSubscriptionUrl(it.config.subscriptionUrl) == normalizedUrl &&
+                            it.name == cp.name
+                    }
+                val prev = existingProfile?.config
                 val updated = base.copy(
-                    subscriptionUrl = url,
+                    subscriptionUrl = normalizedUrl,
                     subscriptionFile = "",
                     subscriptionName = display,
                     userId = uuid.ifBlank { base.userId },
@@ -497,14 +595,12 @@ class ConfigManager(private val context: Context) {
                     routingEnabled = cp.splitEnabled,
                     routingOptions = if (routeNames.isNotEmpty())
                         routeNames.distinct().joinToString("|") else base.routingOptions,
-                    routeRu = cp.routeRu.ifBlank { base.routeRu },
-                    routeNonRu = cp.routeNonRu.ifBlank { base.routeNonRu },
-                    routePrivate = cp.routePrivate.ifBlank { "direct" }
+                    routeRu = cp.routeRu.ifBlank { prev?.routeRu ?: "" },
+                    routeNonRu = cp.routeNonRu.ifBlank { prev?.routeNonRu ?: "" },
+                    routePrivate = cp.routePrivate.ifBlank { prev?.routePrivate ?: "direct" }
                 )
-                val localId = "sub:$cpId"
-                val existingProfile = loadProfiles().firstOrNull { it.id == localId }
                 val profile = VpnProfile(
-                    id = localId,
+                    id = existingProfile?.id ?: localId,
                     name = cp.name,
                     mode = cp.mode,
                     config = updated,
@@ -512,13 +608,16 @@ class ConfigManager(private val context: Context) {
                 )
                 if (existingProfile != null) updateProfile(profile) else addProfile(profile)
                 imported.add(profile)
+                keepIds.add(profile.id)
             }
-            if (imported.isNotEmpty()) selectProfile(imported.first().id)
+            // Удаляем только профили этой подписки, исчезнувшие из payload.
+            pruneSubscription(normalizedUrl, keepIds)
+            if (select && imported.isNotEmpty()) selectProfile(imported.first().id)
             return imported.first()
         }
 
         val updated = base.copy(
-            subscriptionUrl = url,
+            subscriptionUrl = normalizedUrl,
             subscriptionFile = "",
             subscriptionName = display,
             userId = uuid.ifBlank { base.userId },
@@ -528,18 +627,24 @@ class ConfigManager(private val context: Context) {
             serverUrls = nodeUrls.ifEmpty { base.serverUrls },
             nodesJson = nodes.toString(),
             routesJson = canonicalRoutes.toString(),
-            routingEnabled = split.optBoolean("enabled", false) || base.routingEnabled,
+            routingEnabled = if (existing != null)
+                split.optBoolean("enabled", false) || base.routingEnabled
+            else split.optBoolean("enabled", false),
             routingOptions = if (routeNames.isNotEmpty())
                 routeNames.distinct().joinToString("|") else base.routingOptions,
-            routeRu = base.routeRu.ifBlank { action("ru") },
-            routeNonRu = base.routeNonRu.ifBlank { action("non_ru") },
-            routePrivate = if (base.routePrivate.isBlank())
-                action("private").ifBlank { "direct" } else base.routePrivate
+            routeRu = if (existing != null) base.routeRu.ifBlank { action("ru") }
+            else action("ru"),
+            routeNonRu = if (existing != null) base.routeNonRu.ifBlank { action("non_ru") }
+            else action("non_ru"),
+            routePrivate = if (existing != null)
+                base.routePrivate.ifBlank { "direct" }
+            else action("private").ifBlank { "direct" }
         )
         val profile = if (existing != null) existing.copy(config = updated)
-        else VpnProfile(name = display, config = updated)
+        else VpnProfile(id = "sub:$slug:default", name = display, config = updated)
         if (existing != null) updateProfile(profile) else addProfile(profile)
-        selectProfile(profile.id)
+        pruneSubscription(normalizedUrl, setOf(profile.id))
+        if (select) selectProfile(profile.id)
         return profile
     }
 

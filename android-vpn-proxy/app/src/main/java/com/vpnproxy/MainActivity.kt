@@ -321,7 +321,7 @@ fun HomeScreen(
     var manualText by remember { mutableStateOf("") }
     var importStatus by remember { mutableStateOf("") }
 
-    fun importSubscriptionText(raw: String) {
+    fun importSubscriptionText(raw: String, select: Boolean = true) {
         val text = raw.trim()
         if (text.isEmpty()) return
         importStatus = tr("Loading…", "Загрузка…")
@@ -345,7 +345,7 @@ fun HomeScreen(
                         jsonText = conn.inputStream.bufferedReader().use { it.readText() }
                     }
                     val sub = org.json.JSONObject(jsonText)
-                    val profile = configManager.importSubscription(sub, sourceUrl)
+                    val profile = configManager.importSubscription(sub, sourceUrl, select)
                     tr("OK: ${profile.name}", "OK: ${profile.name}")
                 } catch (e: Exception) {
                     tr("Error: ${e.message ?: e.javaClass.simpleName}",
@@ -443,6 +443,19 @@ fun HomeScreen(
                 running = isRunning.value,
                 onSelectProfile = onSelectProfile,
                 onManageProfiles = onManageProfiles,
+                onRefreshSubscription = { p ->
+                    val url = p.config.subscriptionUrl
+                    if (url.isNotBlank()) {
+                        importSubscriptionText(url, select = false)
+                    } else {
+                        importStatus = tr("No subscription on this profile",
+                                           "У этого профиля нет подписки")
+                    }
+                },
+                onDeleteSubscription = { url ->
+                    configManager.deleteSubscription(url)
+                    onRefreshProfiles()
+                },
             )
             Spacer(Modifier.height(24.dp))
         }
@@ -670,7 +683,13 @@ private fun ProfilesSection(
     running: Boolean,
     onSelectProfile: (String) -> Unit,
     onManageProfiles: () -> Unit,
+    onRefreshSubscription: (VpnProfile) -> Unit,
+    onDeleteSubscription: (String) -> Unit,
 ) {
+    val context = LocalContext.current
+    var pendingDelete by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val groups = profiles.groupBy { it.config.subscriptionUrl.trim() }
+
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -690,16 +709,141 @@ private fun ProfilesSection(
             )
             Spacer(Modifier.height(6.dp))
         }
-        profiles.forEach { p ->
-            ProfileCard(p, p.id == activeId) { onSelectProfile(p.id) }
+        if (profiles.isNotEmpty()) {
+            Text(
+                tr("Connection test uses the real route and shows the exit IP.",
+                   "Проверка подключения идёт через реальный маршрут и показывает exit IP."),
+                color = Color.White.copy(alpha = 0.4f),
+                fontSize = 11.sp
+            )
             Spacer(Modifier.height(10.dp))
+        }
+
+        groups.forEach { (subUrl, groupProfiles) ->
+            val first = groupProfiles.firstOrNull() ?: return@forEach
+            val title = first.config.subscriptionName.takeIf { it.isNotBlank() }
+                ?: tr("Local profiles", "Локальные профили")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        if (subUrl.isNotBlank())
+                            tr("${groupProfiles.size} profile(s) in subscription",
+                               "Профилей в подписке: ${groupProfiles.size}")
+                        else tr("${groupProfiles.size} local profile(s)",
+                                "Локальных профилей: ${groupProfiles.size}"),
+                        color = Color.White.copy(alpha = 0.4f),
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                TextButton(
+                    onClick = { ProfileTester.test(context, groupProfiles) },
+                    contentPadding = PaddingValues(horizontal = 8.dp)
+                ) {
+                    Text(tr("Test all", "Тест всех"), fontSize = 12.sp)
+                }
+                if (subUrl.isNotBlank()) {
+                    SubscriptionMenu(
+                        onRefresh = { onRefreshSubscription(first) },
+                        onDelete = { pendingDelete = subUrl to title },
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            groupProfiles.forEach { p ->
+                ProfileCard(
+                    profile = p,
+                    active = p.id == activeId,
+                    test = ProfileTester.results[p.id],
+                    onClick = { onSelectProfile(p.id) },
+                    onTest = { ProfileTester.test(context, listOf(p)) },
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+
+    pendingDelete?.let { (url, name) ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text(tr("Delete subscription", "Удалить подписку")) },
+            text = {
+                Text(tr("Delete \"$name\" and all its profiles? Other subscriptions stay.",
+                        "Удалить \"$name\" и все её профили? Другие подписки останутся."))
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteSubscription(url)
+                    pendingDelete = null
+                }) { Text(tr("Delete", "Удалить")) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) {
+                    Text(tr("Cancel", "Отмена"))
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SubscriptionMenu(onRefresh: () -> Unit, onDelete: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { open = true }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+            Text("⋮", color = Color.White.copy(alpha = 0.7f), fontSize = 18.sp)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text(tr("Refresh subscription", "Обновить подписку")) },
+                onClick = {
+                    open = false
+                    onRefresh()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(tr("Delete subscription", "Удалить подписку")) },
+                onClick = {
+                    open = false
+                    onDelete()
+                }
+            )
         }
     }
 }
 
+private fun testResultLine(r: ProfileTestResult): String = when {
+    r.running -> tr("Checking connection…", "Проверка подключения…")
+    r.ok == true -> buildString {
+        append(if (r.latencyMs > 0) "${r.latencyMs} ms" else "OK")
+        if (r.exitIp.isNotBlank()) append(" · exit ").append(r.exitIp)
+        if (r.route.isNotBlank()) append(" · ").append(r.route)
+    }
+    else -> tr("Failed: ", "Ошибка: ") + r.error.ifBlank { "no response" }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ProfileCard(profile: VpnProfile, active: Boolean, onClick: () -> Unit) {
+private fun ProfileCard(
+    profile: VpnProfile,
+    active: Boolean,
+    test: ProfileTestResult?,
+    onClick: () -> Unit,
+    onTest: () -> Unit,
+) {
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
@@ -746,16 +890,26 @@ private fun ProfileCard(profile: VpnProfile, active: Boolean, onClick: () -> Uni
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                val subName = profile.config.subscriptionName
-                if (subName.isNotBlank()) {
+                test?.let { r ->
+                    val color = when {
+                        r.running -> Color(0xFF9CC9FF)
+                        r.ok == true -> Color(0xFF7BE495)
+                        else -> Color(0xFFFF8A80)
+                    }
                     Text(
-                        text = tr("Subscription: ", "Подписка: ") + subName,
-                        color = Color(0xFF7DB7FF),
+                        text = testResultLine(r),
+                        color = color,
                         fontSize = 11.sp,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+            }
+            TextButton(
+                onClick = onTest,
+                contentPadding = PaddingValues(horizontal = 6.dp)
+            ) {
+                Text(tr("Test", "Тест"), fontSize = 12.sp)
             }
             RadioButton(
                 selected = active,
