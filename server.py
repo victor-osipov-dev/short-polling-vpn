@@ -28,7 +28,7 @@ import aiohttp
 from aiohttp import web
 
 from protocol import (
-    Frame, FLAG_NEW, FLAG_DATA, FLAG_FIN, FLAG_DNS,
+    Frame, FLAG_NEW, FLAG_DATA, FLAG_FIN, FLAG_DNS, FLAG_PAD,
     PROTO_VERSION, RESP_STREAM_MAGIC,
     pack_frames, unpack_frames,
 )
@@ -463,6 +463,8 @@ class SessionManager:
                                 logger.debug(f"[server] DATA: buffered {len(f.payload)} bytes for pending session {sid}")
                         else:
                             logger.warning(f"[server] DATA: session {sid} not found or closed")
+            elif f.flags & FLAG_PAD:
+                logger.debug(f"[server] PAD: client {cid} ignored {len(f.payload)}B (sid {sid})")
             elif f.flags & FLAG_FIN:
                 logger.info(f"[server] FIN: session {sid}")
                 async with self.lock:

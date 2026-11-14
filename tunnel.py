@@ -24,7 +24,7 @@ import httpx
 from protocol import (
     Frame, FLAG_NEW, FLAG_DATA, FLAG_FIN, FLAG_DNS,
     PROTO_VERSION, RESP_STREAM_MAGIC,
-    pack_frames, unpack_frames, new_session_id,
+    pack_frames, unpack_frames, new_session_id, pad_frames,
 )
 from crypto_utils import (
     derive_key, derive_hmac_key, encrypt, decrypt, sign,
@@ -96,6 +96,7 @@ class ClientTunnel:
         self.poll_path = client_cfg.get("poll_path", "/poll")
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
         self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
+        self.pad_polls = bool(client_cfg.get("pad_polls", True))
         self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
         self.poll_method = client_cfg.get("poll_method", "POST").upper()
         self.poll_data_in = client_cfg.get("poll_data_in", "body")
@@ -188,6 +189,7 @@ class ClientTunnel:
         self.poll_path = client_cfg.get("poll_path", "/poll")
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
         self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
+        self.pad_polls = bool(client_cfg.get("pad_polls", True))
         self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
         self.poll_method = client_cfg.get("poll_method", "POST").upper()
         self.poll_data_in = client_cfg.get("poll_data_in", "body")
@@ -460,6 +462,8 @@ class ClientTunnel:
     async def _poll_base(self, url_base: str, frames_to_send,
                          route: tuple[str, ...] = ()) -> None:
         """Один poll-запрос к конкретному входному URL."""
+        if self.pad_polls:
+            frames_to_send = pad_frames(frames_to_send)
         batch = pack_frames(frames_to_send)
         blob = encrypt(self.enc_key, batch)
 

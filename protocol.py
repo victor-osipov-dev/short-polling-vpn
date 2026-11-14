@@ -21,12 +21,14 @@ Frame:
 """
 
 import os
+import random
 import struct
 
 FLAG_NEW = 0x01   # открыть новую сессию: payload = host_len(1) + host + port(2)
 FLAG_DATA = 0x02  # обычные данные
 FLAG_FIN = 0x04   # закрыть сессию (данные закончились / соединение разорвано)
 FLAG_DNS = 0x08   # DNS-запрос/ответ: payload = raw DNS query/response
+FLAG_PAD = 0x10   # padding-кадр: payload игнорируется сервером
 
 # Клиент шлёт заголовок X-Proto: 2, чтобы сервер вернул потоковый формат ответа:
 #   2 байта magic + последовательность записей [2B длина][AESGCM(кадр)].
@@ -91,6 +93,30 @@ def pack_frames(frames) -> bytes:
     for f in frames:
         out += f.encode()
     return bytes(out)
+
+
+PAD_TARGETS = (192, 256, 320, 384, 512, 640, 768)
+
+
+def pad_frames(frames) -> list[Frame]:
+    """Добавляет padding-кадр, чтобы скрыть размер пустого/короткого poll-а.
+
+    Пустые poll-ы добиваются до случайного размера из PAD_TARGETS, а poll-ы
+    с данными получают небольшую случайную добавку. Сервер игнорирует кадры
+    с FLAG_PAD, поэтому протокол остаётся совместимым.
+    """
+    frames = list(frames)
+    base = len(pack_frames(frames))
+    if not frames:
+        target = random.choice(PAD_TARGETS)
+    else:
+        target = base + random.randint(64, 256)
+    need = target - base - _HEADER_LEN
+    if need <= 0:
+        return frames
+    return frames + [
+        Frame(os.urandom(SESSION_ID_LEN), 0, FLAG_PAD, os.urandom(need))
+    ]
 
 
 def unpack_frames(data: bytes):

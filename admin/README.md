@@ -186,6 +186,8 @@ Payload на entry/relay не расшифровывается. Максимум
 - На всех трёх: `short-polling-vpn` (8443) и `vpn-admin` (127.0.0.1:8444), автозапуск включён.
 - Репликация пользователей между мастерами работает (проверено create/disable/enable).
 - Публичные `/sub/<token>`, `/rules/<name>`, `/replicate/ops` — через 8443.
+- Android: `URL select` явно помечен как fallback (entry выбирается маршрутом),
+  размеры пустых poll-запросов маскируются padding (`client.pad_polls: true`).
 - Публичная админка: **https://fimdi.ru:8445** (nginx TLS → 127.0.0.1:8444).
   - Конфиг: `admin/nginx-vpn-admin.conf` → `/etc/nginx/conf.d/vpn-admin.conf`.
   - Открыт только `8445/tcp`; панель по-прежнему слушает localhost.

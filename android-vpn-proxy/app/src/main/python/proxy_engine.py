@@ -33,6 +33,7 @@ FLAG_NEW = 1
 FLAG_DATA = 2
 FLAG_FIN = 4
 FLAG_DNS = 8
+FLAG_PAD = 16
 SESSION_ID_LEN = 16
 # Клиент шлёт X-Proto: 2, сервер возвращает потоковый ответ:
 # magic + записи [2B len][AESGCM(кадр)], каждая расшифровывается независимо.
@@ -89,6 +90,25 @@ def pack_frames(frames) -> bytes:
     for f in frames:
         out += f.encode()
     return bytes(out)
+
+
+PAD_TARGETS = (192, 256, 320, 384, 512, 640, 768)
+
+
+def pad_frames(frames):
+    """Дополняет poll случайным padding-кадром (FLAG_PAD)."""
+    frames = list(frames)
+    base = len(pack_frames(frames))
+    if not frames:
+        target = random.choice(PAD_TARGETS)
+    else:
+        target = base + random.randint(64, 256)
+    need = target - base - _FRAME_HEADER_LEN
+    if need <= 0:
+        return frames
+    return frames + [
+        Frame(os.urandom(SESSION_ID_LEN), 0, FLAG_PAD, os.urandom(need))
+    ]
 
 
 def unpack_frames(data: bytes):
@@ -198,6 +218,7 @@ class ClientTunnel:
         self.server_url = self.server_base + self.poll_path
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
         self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
+        self.pad_polls = bool(client_cfg.get("pad_polls", True))
         self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
         self.poll_method = client_cfg.get("poll_method", "POST").upper()
         self.poll_data_in = client_cfg.get("poll_data_in", "body")
@@ -622,6 +643,8 @@ class ClientTunnel:
     async def _poll_base(self, url_base: str, frames_to_send,
                          route: tuple[str, ...] = ()) -> None:
         """Один poll-запрос к конкретному входному URL."""
+        if self.pad_polls:
+            frames_to_send = pad_frames(frames_to_send)
         batch = pack_frames(frames_to_send)
         blob = encrypt(self.enc_key, batch)
 

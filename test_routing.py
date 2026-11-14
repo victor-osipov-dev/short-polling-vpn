@@ -1,5 +1,6 @@
 import unittest
 
+from protocol import FLAG_PAD, FLAG_DATA, Frame, pack_frames, pad_frames, unpack_frames
 from split_routing import Ruleset, SplitRouter, validate_route_hops
 from subscription import apply_subscription
 
@@ -170,6 +171,36 @@ class SplitRouterTest(unittest.TestCase):
         route = router.route_for("google.com")
         self.assertEqual(route[0], "error")
         self.assertIn("CHAIN", route[4])
+
+
+class ProtocolPaddingTest(unittest.TestCase):
+    def test_empty_poll_is_padded_to_random_size(self):
+        sizes = set()
+        for _ in range(20):
+            frames = pad_frames([])
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(frames[0].flags, FLAG_PAD)
+            sizes.add(len(pack_frames(frames)))
+        self.assertGreater(len(sizes), 1)
+        self.assertTrue(all(100 <= size <= 900 for size in sizes))
+
+    def test_data_poll_gets_small_padding(self):
+        frame = Frame(b"\x01" * 16, 1, FLAG_DATA, b"hello")
+        frames = pad_frames([frame])
+        self.assertEqual(frames[0], frame)
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(frames[1].flags, FLAG_PAD)
+        payload = pack_frames(frames)
+        self.assertGreaterEqual(len(payload), len(pack_frames([frame])) + 60)
+        parsed = unpack_frames(payload)
+        self.assertEqual(parsed[0].payload, b"hello")
+        self.assertEqual(parsed[1].flags, FLAG_PAD)
+
+    def test_padding_does_not_break_frame_parsing(self):
+        frames = pad_frames([])
+        parsed = unpack_frames(pack_frames(frames))
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].flags, FLAG_PAD)
 
 
 class SubscriptionTest(unittest.TestCase):

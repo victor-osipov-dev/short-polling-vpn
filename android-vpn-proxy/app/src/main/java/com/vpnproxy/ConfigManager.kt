@@ -13,6 +13,7 @@ data class ProxyConfig(
     val pollPath: String = "/poll",
     val pollIntervalMs: Int = 50,
     val pollJitterMs: Int = 5,
+    val padPolls: Boolean = true,
     val maxChunkBytes: Int = 65536,
     val verifyTls: Boolean = true,
     val pollMethod: String = "POST",
@@ -91,6 +92,7 @@ data class ProxyConfig(
                 put("poll_path", pollPath)
                 put("poll_interval_ms", pollIntervalMs)
                 put("poll_jitter_ms", pollJitterMs)
+                put("pad_polls", padPolls)
                 put("max_chunk_bytes", maxChunkBytes)
                 put("verify_tls", verifyTls)
                 put("poll_method", pollMethod)
@@ -144,6 +146,7 @@ data class ProxyConfig(
                 pollPath = client.optString("poll_path", defaults.pollPath),
                 pollIntervalMs = client.optInt("poll_interval_ms", defaults.pollIntervalMs),
                 pollJitterMs = client.optInt("poll_jitter_ms", defaults.pollJitterMs),
+                padPolls = client.optBoolean("pad_polls", defaults.padPolls),
                 maxChunkBytes = client.optInt("max_chunk_bytes", defaults.maxChunkBytes),
                 verifyTls = client.optBoolean("verify_tls", defaults.verifyTls),
                 pollMethod = client.optString("poll_method", defaults.pollMethod),

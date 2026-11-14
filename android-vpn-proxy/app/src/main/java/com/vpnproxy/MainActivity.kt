@@ -1098,6 +1098,40 @@ fun SimpleConfigTab(
                 label = { Text(tr("Random", "Случайно")) }
             )
         }
+        Text(
+            when {
+                cfg.routingEnabled && cfg.routingOptions.isNotBlank() ->
+                    tr("URL select is only a fallback. For split traffic the entry server is chosen by the route from the subscription.",
+                       "Выбор URL — только fallback. Для split-трафика entry выбирается маршрутом из подписки.")
+                cfg.routingEnabled ->
+                    tr("Split routing is on, but the route list is empty. URL select may still be used as a fallback.",
+                       "Split routing включён, но список маршрутов пуст. Выбор URL может использоваться как fallback.")
+                else ->
+                    tr("Split routing is off: all connections use URL select.",
+                       "Split routing выключен: все соединения используют выбор URL.")
+            },
+            fontSize = 11.sp,
+            color = if (cfg.routingEnabled) Color(0xFFFFB74D)
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                tr("Pad poll sizes", "Маскировать размеры poll"),
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f)
+            )
+            Switch(
+                checked = cfg.padPolls,
+                onCheckedChange = { save(cfg.copy(padPolls = it)) }
+            )
+        }
+        Text(
+            tr("Empty poll requests are padded to random sizes so the active entry is harder to spot by request size.",
+               "Пустые poll-запросы дополняются случайным padding, чтобы активный entry было сложнее определить по размеру запроса."),
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
 
         ConfigTextField("Poll Path", cfg.pollPath) { save(cfg.copy(pollPath = it)) }
         ConfigTextField("Host header (optional)", cfg.hostHeader) { save(cfg.copy(hostHeader = it)) }

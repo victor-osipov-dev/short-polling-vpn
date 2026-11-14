@@ -41,6 +41,7 @@ client:
   poll_path: "/poll"          # путь VPN-ручки (можно сменить для маскировки)
   poll_interval_ms: 200
   poll_jitter_ms: 50
+  pad_polls: true              # добивать пустые poll-запросы случайным padding
   max_chunk_bytes: 4096
   url_fail_limit: 3            # ошибок подряд до отправки URL в карантин
   url_cooldown_seconds: 60     # время карантина URL (секунды)

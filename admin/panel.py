@@ -827,9 +827,13 @@ class Handler(BaseHTTPRequestHandler):
         for i, hop in enumerate(hops):
             cands = ", ".join(str(c) for c in (hop.get("candidates") or []))
             strategy = hop.get("strategy", "round")
+            cand_count = len(hop.get("candidates") or [])
+            strategy_note = (" — стратегия не используется"
+                             if cand_count <= 1 else "")
             hop_rows.append(f"""
 <div class="card" style="background:#0f1526">
 <b>Hop {i + 1}</b>
+<span class="muted">кандидатов: {cand_count}{strategy_note}</span>
 <label>Кандидаты (node_id через запятую)</label>
 <input name="hop_candidates_{i}" value="{esc(cands)}">
 <label>Стратегия</label>
@@ -852,7 +856,8 @@ class Handler(BaseHTTPRequestHandler):
 <p class="muted">Клиент выбирает только разные узлы: один node_id/URL не может
 встречаться дважды. Если уникальных узлов меньше числа hop-ов, маршрут
 сокращается, а в лог пишется предупреждение. Пересечение кандидатов между
-hop-ами — это предупреждение, а не ошибка.</p>
+hop-ами — это предупреждение, а не ошибка. Стратегия round/random работает
+только если в hop-е два и более кандидатов.</p>
 <form method="post" action="{esc(action)}" id="routeForm">
 <input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
 <input type="hidden" name="hops_count" value="{len(hops)}" id="hopsCount">
