@@ -186,11 +186,15 @@ Payload на entry/relay не расшифровывается. Максимум
 - На всех трёх: `short-polling-vpn` (8443) и `vpn-admin` (127.0.0.1:8444), автозапуск включён.
 - Репликация пользователей между мастерами работает (проверено create/disable/enable).
 - Публичные `/sub/<token>`, `/rules/<name>`, `/replicate/ops` — через 8443.
+- Публичная админка: **https://fimdi.ru:8445** (nginx TLS → 127.0.0.1:8444).
+  - Конфиг: `admin/nginx-vpn-admin.conf` → `/etc/nginx/conf.d/vpn-admin.conf`.
+  - Открыт только `8445/tcp`; панель по-прежнему слушает localhost.
+  - Включены HSTS, CSP, `X-Frame-Options: DENY`, `Secure`-cookie.
+  - На `/login` действует rate-limit `10r/m` (burst 5), на остальные страницы — `120r/m`.
 - Вход в панель:
-  ```bash
-  ssh -L 8444:127.0.0.1:8444 root@177.3.220.12
-  # http://127.0.0.1:8444
-  ```
+  - снаружи: `https://fimdi.ru:8445`;
+  - локально через SSH-туннель: `ssh -L 8444:127.0.0.1:8444 root@177.3.220.12`,
+    затем `http://127.0.0.1:8444`.
 - Пароль администратора задан при деплое; сменить:
   ```bash
   python -m admin.panel --hash-password 'новый-пароль'

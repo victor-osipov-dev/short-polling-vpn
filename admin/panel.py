@@ -637,7 +637,9 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.4)
             return self.login_page("Неверный логин или пароль")
         token, csrf = self.panel.sessions.create(username)
-        cookie = f"vpn_admin={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={self.panel.sessions.ttl}"
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
+        cookie = (f"vpn_admin={token}; Path=/; HttpOnly; SameSite=Strict"
+                  f"{secure}; Max-Age={self.panel.sessions.ttl}")
         self.redirect("/users", cookie)
 
     # pages
