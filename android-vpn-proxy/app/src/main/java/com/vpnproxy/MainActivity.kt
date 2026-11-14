@@ -374,7 +374,7 @@ fun HomeScreen(
             setDesiredBarcodeFormats(ScanOptions.QR_CODE)
             setPrompt("VPN subscription QR")
             setBeepEnabled(false)
-            setOrientationLocked(false)
+            setOrientationLocked(true)
         }
     }
 
@@ -693,7 +693,7 @@ private fun ProfilesSection(
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                tr("Profiles", "Общее"),
+                tr("Profiles", "Профили"),
                 color = Color.White,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -708,15 +708,6 @@ private fun ProfilesSection(
                 fontSize = 11.sp
             )
             Spacer(Modifier.height(6.dp))
-        }
-        if (profiles.isNotEmpty()) {
-            Text(
-                tr("Connection test uses the real route and shows the exit IP.",
-                   "Проверка подключения идёт через реальный маршрут и показывает exit IP."),
-                color = Color.White.copy(alpha = 0.4f),
-                fontSize = 11.sp
-            )
-            Spacer(Modifier.height(10.dp))
         }
 
         groups.forEach { (subUrl, groupProfiles) ->
@@ -1598,7 +1589,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
     ) {
         LanguageRow()
         Divider()
-        Text(tr("Profiles", "Общее"), style = MaterialTheme.typography.titleMedium,
+        Text(tr("Profiles", "Профили"), style = MaterialTheme.typography.titleMedium,
              color = MaterialTheme.colorScheme.onSurface)
         Text(tr("Each profile stores mode, connection settings and routing. Switch, then Stop/Start to apply.", "Каждый профиль хранит режим, настройки подключения и маршрутизацию. Переключите и перезапустите VPN."),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
