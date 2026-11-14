@@ -179,8 +179,18 @@ CREATE TABLE audit_log (
     "name": "Pixel 8"
   },
   "nodes": [
-    {"id": "ru-1", "url": "https://177.3.220.12:8443", "region": "RU"},
-    {"id": "de-1", "url": "https://2.27.37.211:8443", "region": "DE"}
+    {"id": "ru-2", "name": "RU exit", "url": "https://fimdi.ru:8443", "region": "RU"},
+    {"id": "ru-1", "name": "FI exit", "url": "https://177.3.220.12:8443", "region": "FI"},
+    {"id": "de-1", "name": "DE exit", "url": "https://2.27.37.211:8443", "region": "DE"}
+  ],
+  "routes": [
+    {"name": "RU exit", "hops": [{"candidates": ["ru-2"], "strategy": "round"}]},
+    {"name": "FI exit", "hops": [{"candidates": ["ru-1"], "strategy": "round"}]},
+    {"name": "DE exit", "hops": [{"candidates": ["de-1"], "strategy": "round"}]},
+    {"name": "RU -> DE", "hops": [
+      {"candidates": ["ru-2"], "strategy": "round"},
+      {"candidates": ["de-1"], "strategy": "round"}
+    ]}
   ],
   "profiles": [
     {
@@ -727,15 +737,16 @@ GET /rules/latest             -> latest version metadata + URL
 - `admin/rules.py` — обновление публичных RU GeoIP/доменов.
 - `server.py` — публичные `/sub/<token>`, `/rules/<name>`, `/replicate/ops`.
 - Android UI: в Settings → Connection поле **Subscription URL** и кнопка «Загрузить» (user/узлы сохраняются; маршруты и split-routing применяются при подключении).
-- Панель: страница **Узлы** (subscription.nodes, пиры, файлы правил, node_id/public_key).
-- Тесты: 13 (хранилище, панель, репликация, auth, split-routing, subscription).
-- **Задеплоено** на `177.3.220.12` (ru-1) и `2.27.37.211` (de-1): VPN 8443, admin 127.0.0.1:8444, репликация, подписки, правила, split-routing, relay-цепочка RU→DE.
+- Панель: страница **Узлы** (subscription.nodes, пиры, файлы правил, node_id/public_key), страница **Маршруты** (конструктор цепочек из 1–3 hop-ов) и **Профили** (route_ru/route_non_ru/route_private выбираются из маршрутов).
+- Тесты: 15 (хранилище, панель, репликация, auth, split-routing, subscription).
+- **Задеплоено** на `157.228.134.211` (ru-2, домен `fimdi.ru`), `177.3.220.12` (ru-1, FI) и `2.27.37.211` (de-1): VPN 8443, admin 127.0.0.1:8444, репликация, подписки, правила, split-routing, relay-цепочка RU→DE.
 
 ### Проверено вживую
 
-- `ya.ru` (RU) → `177.3.220.12`, `example.com` (non-RU) → `2.27.37.211`;
+- `ya.ru` (RU) → `157.228.134.211` (ru-2), `example.com` (non-RU) → `2.27.37.211` (de-1);
+- relay: `example.com` через `RU -> DE` при единственном `server_url` ru-2 доходит до de-1;
 - `127.0.0.1` (private) → direct, без VPN;
-- Android-движок даёт те же результаты;
+- Android-движок даёт те же результаты (в engine передаются `nodes` и каталог `routes`);
 - per-user auth: 200, устройство в БД, disable → 000;
 - legacy PSK: 200;
 - репликация: 8 тестов, подписи/tombstones.
