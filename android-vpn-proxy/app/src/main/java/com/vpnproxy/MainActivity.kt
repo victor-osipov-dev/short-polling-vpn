@@ -508,14 +508,25 @@ private fun SubscriptionCard(
                 Text(subUrlText, color = Color.White.copy(alpha = 0.45f),
                      fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            Button(
+                onClick = onPaste,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+            ) {
+                Text(
+                    tr("Add subscription", "Добавить подписку"),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onPaste, modifier = Modifier.weight(1f)) {
-                    Text(tr("Paste", "Вставить"))
-                }
-                Button(onClick = onQr, modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = onQr, modifier = Modifier.weight(1f)) {
                     Text("QR")
                 }
-                Button(onClick = onManual, modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = onManual, modifier = Modifier.weight(1f)) {
                     Text(tr("Manual", "Вручную"))
                 }
             }
