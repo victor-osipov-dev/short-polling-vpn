@@ -121,6 +121,25 @@ class ClientProfile:
         }
 
 
+@dataclass
+class Route:
+    id: str
+    name: str
+    hops: list
+    sort_order: int
+    created_at: int
+    updated_at: int
+    updated_by: str
+
+    def to_public(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "hops": self.hops,
+            "sort_order": self.sort_order,
+        }
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -176,6 +195,16 @@ CREATE TABLE IF NOT EXISTS client_profiles (
     route_ru TEXT NOT NULL DEFAULT '',
     route_non_ru TEXT NOT NULL DEFAULT '',
     route_private TEXT NOT NULL DEFAULT 'direct',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS routes (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    hops TEXT NOT NULL DEFAULT '[]',
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
@@ -514,6 +543,13 @@ class Store:
                     self._upsert_client_profile(payload, entity_key)
                 else:
                     raise ValueError("bad profile op")
+            elif entity == "route":
+                if kind == "delete":
+                    self.conn.execute("DELETE FROM routes WHERE id=?", (entity_key,))
+                elif kind == "upsert":
+                    self._upsert_route(payload, entity_key)
+                else:
+                    raise ValueError("bad route op")
             else:
                 raise ValueError("unknown entity")
             self._record_applied(op_id)
@@ -609,6 +645,28 @@ class Store:
         updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "id")
         self.conn.execute(
             f"INSERT INTO client_profiles({','.join(cols)}) VALUES({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}",
+            values,
+        )
+
+    def _upsert_route(self, payload: dict, route_id: str) -> None:
+        cols = ("id", "name", "hops", "sort_order", "created_at", "updated_at", "updated_by")
+        values = []
+        for col in cols:
+            value = payload.get(col)
+            if col == "id":
+                value = route_id
+            elif col == "hops":
+                value = value if isinstance(value, str) else json_text(value or [])
+            elif col == "sort_order":
+                value = int(value or 0)
+            elif col in ("created_at", "updated_at"):
+                value = int(value or now_ms())
+            values.append(value)
+        placeholders = ",".join("?" for _ in cols)
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+        self.conn.execute(
+            f"INSERT INTO routes({','.join(cols)}) VALUES({placeholders}) "
             f"ON CONFLICT(id) DO UPDATE SET {updates}",
             values,
         )
@@ -953,6 +1011,90 @@ class Store:
     def _client_profile_payload(self, profile_id: str) -> dict:
         profile = self.get_client_profile(profile_id)
         return profile.to_public() if profile else {}
+
+    # ── routes (конструктор цепочек) ─────────────────────────────────
+
+    @staticmethod
+    def _row_to_route(row: sqlite3.Row) -> Route:
+        return Route(
+            id=row["id"], name=row["name"], hops=json_load(row["hops"], []),
+            sort_order=row["sort_order"], created_at=row["created_at"],
+            updated_at=row["updated_at"], updated_by=row["updated_by"],
+        )
+
+    def list_routes(self) -> list[Route]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM routes ORDER BY sort_order, created_at"
+            ).fetchall()
+        return [self._row_to_route(r) for r in rows]
+
+    def get_route(self, route_id: str) -> Optional[Route]:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM routes WHERE id=?", (route_id,)).fetchone()
+        return self._row_to_route(row) if row else None
+
+    def get_route_by_name(self, name: str) -> Optional[Route]:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM routes WHERE name=?", (name,)).fetchone()
+        return self._row_to_route(row) if row else None
+
+    def create_route(self, name: str, hops: list, sort_order: Optional[int] = None,
+                     actor: str = "admin") -> Route:
+        route_id = str(uuidlib.uuid4())
+        ts = now_ms()
+        if sort_order is None:
+            with self.lock:
+                row = self.conn.execute(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM routes"
+                ).fetchone()
+            sort_order = int(row["n"])
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO routes(id,name,hops,sort_order,created_at,updated_at,updated_by) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (route_id, name, json_text(hops or []), sort_order, ts, ts, self.node_id),
+            )
+            self.conn.commit()
+        self._log_op("route", route_id, "upsert", self._route_payload(route_id))
+        self.audit(actor, "create_route", route_id, name)
+        return self.get_route(route_id)
+
+    def update_route(self, route_id: str, name: Optional[str] = None,
+                     hops: Optional[list] = None,
+                     sort_order: Optional[int] = None) -> Optional[Route]:
+        sets, values = [], []
+        if name is not None:
+            sets.append("name=?"); values.append(name)
+        if hops is not None:
+            sets.append("hops=?"); values.append(json_text(hops))
+        if sort_order is not None:
+            sets.append("sort_order=?"); values.append(int(sort_order))
+        if not sets:
+            return self.get_route(route_id)
+        sets.append("updated_at=?"); values.append(self.next_hlc())
+        sets.append("updated_by=?"); values.append(self.node_id)
+        values.append(route_id)
+        with self.lock:
+            self.conn.execute(
+                f"UPDATE routes SET {', '.join(sets)} WHERE id=?", values
+            )
+            self.conn.commit()
+        self._log_op("route", route_id, "upsert", self._route_payload(route_id))
+        return self.get_route(route_id)
+
+    def delete_route(self, route_id: str, actor: str = "admin") -> bool:
+        with self.lock:
+            cur = self.conn.execute("DELETE FROM routes WHERE id=?", (route_id,))
+            self.conn.commit()
+        if cur.rowcount:
+            self._log_op("route", route_id, "delete", {})
+            self.audit(actor, "delete_route", route_id)
+        return cur.rowcount > 0
+
+    def _route_payload(self, route_id: str) -> dict:
+        route = self.get_route(route_id)
+        return route.to_public() if route else {}
 
     # ── audit read ───────────────────────────────────────────────────
 

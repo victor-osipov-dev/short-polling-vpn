@@ -232,6 +232,18 @@ class Panel:
                        for n in (sub_cfg.get("nodes", []) or []) if n.get("url")}
         route_nodes: dict[str, set[str]] = {}
         route_exits: dict[str, str] = {}
+        for route in self.store.list_routes():
+            used: set[str] = set()
+            exit_id = ""
+            for hop in route.hops or []:
+                for cand in hop.get("candidates", []) or []:
+                    cand = str(cand)
+                    nid = cand if cand in url_to_node.values() else url_to_node.get(cand.rstrip("/"), "")
+                    if nid:
+                        used.add(nid)
+                        exit_id = nid
+            route_nodes[route.name] = used
+            route_exits[route.name] = exit_id
         for prof in sub_cfg.get("profiles", []) or []:
             for route in prof.get("routes", []) or []:
                 name = route.get("name")
@@ -298,6 +310,7 @@ class Panel:
             },
             "nodes": nodes,
             "profiles": sub_cfg.get("profiles", []) or [],
+            "routes": [r.to_public() for r in self.store.list_routes()],
             "client_profiles": visible_profiles,
             "split_routing": split,
         }
@@ -471,6 +484,7 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return ('<a href="/users">Пользователи</a>'
                 '<a href="/profiles">Профили</a>'
+                '<a href="/routes">Маршруты</a>'
                 '<a href="/nodes">Узлы</a>'
                 '<a href="/audit">Аудит</a>'
                 '<a href="/logout">Выйти</a>')
@@ -511,6 +525,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.nodes_page(sess)
             if path == "/profiles":
                 return self.profiles_page(sess)
+            if path == "/routes":
+                return self.routes_page(sess)
+            m = re.fullmatch(r"/routes/([0-9a-fA-F-]{36})", path)
+            if m:
+                return self.route_edit_page(sess, m.group(1))
             m = re.fullmatch(r"/profiles/([0-9a-fA-F-]{36})", path)
             if m:
                 return self.profile_edit_page(sess, m.group(1))
@@ -554,6 +573,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_user(form, sess)
             if path == "/profiles/new":
                 return self.create_profile(form, sess)
+            if path == "/routes/new":
+                return self.create_route(form, sess)
+            m = re.fullmatch(r"/routes/([0-9a-fA-F-]{36})/(save|delete)", path)
+            if m:
+                return self.route_action(m.group(1), m.group(2), form, sess)
             m = re.fullmatch(r"/profiles/([0-9a-fA-F-]{36})/(save|update|delete)", path)
             if m:
                 return self.profile_action(m.group(1), m.group(2), form, sess)
@@ -752,8 +776,173 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect(f"/users/{user_uuid}")
         return self.redirect("/users")
 
+    def route_edit_page(self, sess: dict, route_id: str):
+        r = self.panel.store.get_route(route_id)
+        if not r:
+            return self.send_html(page("404", "<p>Маршрут не найден</p>", self.nav(sess)), 404)
+        nodes = (self.panel.cfg.get("subscription") or {}).get("nodes") or []
+        node_options = "".join(
+            f"<option value='{esc(n.get('id'))}'>{esc(n.get('id'))} — {esc(n.get('name'))}</option>"
+            for n in nodes
+        )
+        hops = r.hops or []
+        hop_rows = []
+        for i, hop in enumerate(hops):
+            cands = ", ".join(str(c) for c in (hop.get("candidates") or []))
+            strategy = hop.get("strategy", "round")
+            hop_rows.append(f"""
+<div class="card" style="background:#0f1526">
+<b>Hop {i + 1}</b>
+<label>Кандидаты (node_id через запятую)</label>
+<input name="hop_candidates_{i}" value="{esc(cands)}">
+<label>Стратегия</label>
+<select name="hop_strategy_{i}">
+<option value="round" {'selected' if strategy == 'round' else ''}>round</option>
+<option value="random" {'selected' if strategy == 'random' else ''}>random</option>
+</select>
+</div>""")
+        body = f"""
+<div class="card">
+<form method="post" action="/routes/{esc(r.id)}/save" id="routeForm">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<input type="hidden" name="hops_count" value="{len(hops)}" id="hopsCount">
+<label>Название маршрута</label><input name="name" value="{esc(r.name)}" required>
+<label>Порядок</label><input name="sort_order" type="number" value="{r.sort_order}">
+<h2>Цепочка (entry → … → exit)</h2>
+{''.join(hop_rows)}
+<div class="row" style="margin-top:10px">
+<button type="button" class="secondary" onclick="addHop()">+ Добавить hop</button>
+<button type="button" class="secondary" onclick="removeHop()">− Удалить последний</button>
+</div>
+<div class="row" style="margin-top:14px">
+<button type="submit">Сохранить маршрут</button>
+<a class="btn secondary" href="/routes">Назад</a>
+</div>
+</form>
+<form method="post" action="/routes/{esc(r.id)}/delete" style="margin-top:14px"
+ onsubmit="return confirm('Удалить маршрут?')">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<button class="danger" type="submit">Удалить маршрут</button>
+</form>
+</div>
+<script>
+const NODES = {node_options!r};
+function addHop() {{
+  const n = document.getElementById('hopsCount');
+  const i = parseInt(n.value, 10);
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.style.background = '#0f1526';
+  div.innerHTML = '<b>Hop ' + (i + 1) + '</b>' +
+    '<label>Кандидаты (node_id через запятую)</label>' +
+    '<input name="hop_candidates_' + i + '" value="">' +
+    '<label>Стратегия</label>' +
+    '<select name="hop_strategy_' + i + '"><option value="round">round</option>' +
+    '<option value="random">random</option></select>';
+  document.getElementById('routeForm').insertBefore(div, document.getElementById('routeForm').lastElementChild);
+  n.value = i + 1;
+}}
+function removeHop() {{
+  const n = document.getElementById('hopsCount');
+  const i = parseInt(n.value, 10);
+  if (i <= 1) return;
+  const inputs = document.querySelectorAll('[name^=hop_candidates_]');
+  const sels = document.querySelectorAll('[name^=hop_strategy_]');
+  const lastInput = inputs[inputs.length - 1];
+  const lastSel = sels[sels.length - 1];
+  lastInput.closest('.card').remove();
+  n.value = i - 1;
+}}
+</script>"""
+        self.send_html(page("Маршрут: " + r.name, body, self.nav(sess)))
+
+    def create_route(self, form: dict, sess: dict):
+        name = (form.get("name") or "").strip()
+        if not name:
+            return self.send_html(page("Ошибка", "<p class='error'>Название обязательно</p>",
+                                        self.nav(sess)), 400)
+        hops = []
+        try:
+            count = int(form.get("hops_count") or 1)
+        except ValueError:
+            count = 1
+        for i in range(max(1, min(count, 3))):
+            cands = [c.strip() for c in (form.get(f"hop_candidates_{i}") or "").split(",")
+                     if c.strip()]
+            if not cands:
+                continue
+            hops.append({"candidates": cands,
+                         "strategy": form.get(f"hop_strategy_{i}") or "round"})
+        if not hops:
+            return self.send_html(page("Ошибка", "<p class='error'>Нужен хотя бы один hop</p>",
+                                        self.nav(sess)), 400)
+        self.panel.store.create_route(name, hops, actor=self.panel.username)
+        self.redirect("/routes")
+
+    def route_action(self, route_id: str, action: str, form: dict, sess: dict):
+        if action == "delete":
+            self.panel.store.delete_route(route_id, self.panel.username)
+        else:
+            hops = []
+            try:
+                count = int(form.get("hops_count") or 1)
+            except ValueError:
+                count = 1
+            for i in range(max(1, min(count, 3))):
+                cands = [c.strip() for c in (form.get(f"hop_candidates_{i}") or "").split(",")
+                         if c.strip()]
+                if cands:
+                    hops.append({"candidates": cands,
+                                 "strategy": form.get(f"hop_strategy_{i}") or "round"})
+            sort_order = None
+            if form.get("sort_order"):
+                try:
+                    sort_order = int(form["sort_order"])
+                except ValueError:
+                    pass
+            self.panel.store.update_route(
+                route_id,
+                name=(form.get("name") or "").strip() or None,
+                hops=hops or None,
+                sort_order=sort_order,
+            )
+        self.redirect("/routes")
+
+    def routes_page(self, sess: dict):
+        routes = self.panel.store.list_routes()
+        rows = []
+        for r in routes:
+            chain = " → ".join(
+                "/".join(str(c) for c in (h.get("candidates") or [])) for h in (r.hops or [])
+            )
+            rows.append(f"""
+<tr><td><b>{esc(r.name)}</b><div class="muted">{esc(r.id)}</div></td>
+<td><code>{esc(chain)}</code></td><td>{len(r.hops or [])}</td>
+<td><a class="btn secondary" href="/routes/{esc(r.id)}">Изменить</a></td></tr>""")
+        body = f"""
+<div class="card">
+<h2 style="margin-top:0">Новый маршрут</h2>
+<form method="post" action="/routes/new">
+<input type="hidden" name="csrf" value="{esc(sess['csrf'])}">
+<input type="hidden" name="hops_count" value="1">
+<label>Название</label><input name="name" required>
+<label>Hop 1 — кандидаты (node_id через запятую)</label><input name="hop_candidates_0" placeholder="ru-1">
+<label>Стратегия</label><select name="hop_strategy_0"><option>round</option><option>random</option></select>
+<div style="margin-top:12px"><button type="submit">Создать маршрут</button></div>
+</form>
+</div>
+<div class="card">
+<h2 style="margin-top:0">Маршруты</h2>
+<table><tr><th>Название</th><th>Цепочка</th><th>Hop-ов</th><th></th></tr>
+{''.join(rows) or '<tr><td colspan="4" class="muted">Маршрутов пока нет</td></tr>'}
+</table>
+</div>"""
+        self.send_html(page("Маршруты", body, self.nav(sess)))
+
     def profiles_page(self, sess: dict):
         profiles = self.panel.store.list_client_profiles()
+        routes = [r.name for r in self.panel.store.list_routes()]
+        route_options = "".join(f"<option value='{esc(r)}'>{esc(r)}</option>" for r in routes)
         rows = []
         for p in profiles:
             rows.append(f"""
@@ -775,13 +964,14 @@ class Handler(BaseHTTPRequestHandler):
 <select name="mode"><option value="proxy">proxy</option><option value="vpn">vpn</option></select></div>
 </div>
 <div class="row">
-<div style="flex:1"><label>RU маршрут</label><input name="route_ru" placeholder="RU exit"></div>
-<div style="flex:1"><label>non-RU маршрут</label><input name="route_non_ru" placeholder="DE exit"></div>
-<div style="flex:1"><label>Private</label><input name="route_private" value="direct"></div>
+<div style="flex:1"><label>RU маршрут</label><select name="route_ru"><option value="">—</option>{route_options}</select></div>
+<div style="flex:1"><label>non-RU маршрут</label><select name="route_non_ru"><option value="">—</option>{route_options}</select></div>
+<div style="flex:1"><label>Private</label><select name="route_private"><option value="direct">direct</option>{route_options}</select></div>
 </div>
 <label><input type="checkbox" name="split_enabled" value="1" style="width:auto"> Split routing</label>
 <div style="margin-top:12px"><button type="submit">Создать профиль</button></div>
 </form>
+<p class="muted">Маршруты создаются в разделе <a href="/routes">Маршруты</a>.</p>
 </div>
 <div class="card">
 <h2 style="margin-top:0">Профили подписки</h2>
@@ -796,6 +986,15 @@ class Handler(BaseHTTPRequestHandler):
         p = self.panel.store.get_client_profile(profile_id)
         if not p:
             return self.send_html(page("404", "<p>Профиль не найден</p>", self.nav(sess)), 404)
+        routes = [r.name for r in self.panel.store.list_routes()]
+        def opts(current: str) -> str:
+            out = "<option value=''>—</option>"
+            if current and current not in routes:
+                out += f"<option value='{esc(current)}' selected>{esc(current)} (нет в конструкторе)</option>"
+            for r in routes:
+                sel = " selected" if r == current else ""
+                out += f"<option value='{esc(r)}'{sel}>{esc(r)}</option>"
+            return out
         body = f"""
 <div class="card">
 <form method="post" action="/profiles/{esc(p.id)}/save">
@@ -809,14 +1008,15 @@ class Handler(BaseHTTPRequestHandler):
 <label><input type="checkbox" name="split_enabled" value="1" style="width:auto"
  {'checked' if p.split_enabled else ''}> Split routing</label>
 <div class="row">
-<div style="flex:1"><label>RU маршрут</label><input name="route_ru" value="{esc(p.route_ru)}"></div>
-<div style="flex:1"><label>non-RU маршрут</label><input name="route_non_ru" value="{esc(p.route_non_ru)}"></div>
-<div style="flex:1"><label>Private</label><input name="route_private" value="{esc(p.route_private)}"></div>
+<div style="flex:1"><label>RU маршрут</label><select name="route_ru">{opts(p.route_ru)}</select></div>
+<div style="flex:1"><label>non-RU маршрут</label><select name="route_non_ru">{opts(p.route_non_ru)}</select></div>
+<div style="flex:1"><label>Private</label><select name="route_private">{opts(p.route_private)}</select></div>
 </div>
 <label>Порядок</label><input name="sort_order" type="number" value="{p.sort_order}">
 <div class="row" style="margin-top:14px">
 <button type="submit">Сохранить</button>
 <a class="btn secondary" href="/profiles">Назад</a>
+<a class="btn secondary" href="/routes">Маршруты</a>
 </div>
 </form>
 <form method="post" action="/profiles/{esc(p.id)}/delete" style="margin-top:14px"
