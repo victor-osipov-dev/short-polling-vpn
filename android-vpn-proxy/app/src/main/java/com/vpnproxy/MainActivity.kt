@@ -4,9 +4,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.VpnService
@@ -36,6 +40,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -59,9 +64,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import java.util.UUID
 
 data class LogEntry(val id: Long, val text: String)
@@ -74,6 +82,16 @@ data class UrlRuntimeStatus(
     val cooldownRemaining: Int,
     val errors: Int,
 )
+
+/** Простая локализация без AppCompat: строки подставляются в Compose. */
+object L {
+    @Volatile
+    var ru: Boolean = false
+
+    fun t(en: String, ru: String): String = if (this.ru) ru else en
+}
+
+private fun tr(en: String, ru: String): String = L.t(en, ru)
 
 class MainActivity : ComponentActivity() {
     private lateinit var configManager: ConfigManager
@@ -161,8 +179,17 @@ class MainActivity : ComponentActivity() {
         startProxy(this)
     }
 
+    override fun attachBaseContext(newBase: Context) {
+        val prefs = newBase.getSharedPreferences("vpnproxy", Context.MODE_PRIVATE)
+        val language = prefs.getString("language", "en") ?: "en"
+        val config = Configuration(newBase.resources.configuration)
+        config.setLocale(Locale(language))
+        super.attachBaseContext(newBase.createConfigurationContext(config))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        L.ru = resources.configuration.locales[0].language == "ru"
         configManager = ConfigManager(this)
 
         // Отражаем фактическое состояние сервиса (полезно после рестарта процесса,
@@ -250,14 +277,17 @@ fun MainScreen(
             urlStatus = urlStatus,
             isRunning = isRunning.value,
             onResetUrlErrors = { resetUrlErrors(appContext) },
+            onRestartVpn = { restartProxy(appContext) },
             onTabChange = { settingsTab = it },
             onBack = { showSettings = false },
         )
     } else {
         HomeScreen(
+            configManager = configManager,
             profiles = profiles,
             activeId = activeId,
             isRunning = isRunning,
+            onRefreshProfiles = { refreshProfiles() },
             onSelectProfile = { id ->
                 configManager.selectProfile(id)
                 refreshProfiles()
@@ -273,9 +303,11 @@ fun MainScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
+    configManager: ConfigManager,
     profiles: List<VpnProfile>,
     activeId: String,
     isRunning: MutableState<Boolean>,
+    onRefreshProfiles: () -> Unit,
     onSelectProfile: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onManageProfiles: () -> Unit,
@@ -283,6 +315,68 @@ fun HomeScreen(
     val context = LocalContext.current
     val active = profiles.firstOrNull { it.id == activeId } ?: profiles.firstOrNull()
     val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    var showManual by remember { mutableStateOf(false) }
+    var manualText by remember { mutableStateOf("") }
+    var importStatus by remember { mutableStateOf("") }
+
+    fun importSubscriptionText(raw: String) {
+        val text = raw.trim()
+        if (text.isEmpty()) return
+        importStatus = tr("Loading…", "Загрузка…")
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    val jsonText: String
+                    var sourceUrl = ""
+                    if (text.startsWith("{")) {
+                        jsonText = text
+                    } else {
+                        sourceUrl = text
+                        val conn = java.net.URL(text).openConnection() as java.net.HttpURLConnection
+                        conn.connectTimeout = 10_000
+                        conn.readTimeout = 20_000
+                        conn.setRequestProperty("User-Agent", "vpn-client/1.0")
+                        val code = conn.responseCode
+                        if (code !in 200..299) {
+                            return@withContext tr("Error: HTTP $code", "Ошибка: HTTP $code")
+                        }
+                        jsonText = conn.inputStream.bufferedReader().use { it.readText() }
+                    }
+                    val sub = org.json.JSONObject(jsonText)
+                    val profile = configManager.importSubscription(sub, sourceUrl)
+                    tr("OK: ${profile.name}", "OK: ${profile.name}")
+                } catch (e: Exception) {
+                    tr("Error: ${e.message ?: e.javaClass.simpleName}",
+                       "Ошибка: ${e.message ?: e.javaClass.simpleName}")
+                }
+            }
+            importStatus = result
+            if (result.startsWith("OK")) onRefreshProfiles()
+        }
+    }
+
+    fun pasteFromClipboard() {
+        val clip = clipboard.primaryClip
+        if (clip != null && clip.itemCount > 0) {
+            importSubscriptionText(clip.getItemAt(0).coerceToText(context).toString())
+        } else {
+            importStatus = tr("Clipboard is empty", "Буфер обмена пуст")
+        }
+    }
+
+    val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let { importSubscriptionText(it) }
+    }
+    val qrOptions = remember {
+        ScanOptions().apply {
+            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            setPrompt("VPN subscription QR")
+            setBeepEnabled(false)
+            setOrientationLocked(false)
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -314,14 +408,15 @@ fun HomeScreen(
                 }
             }
             Text(
-                text = if (isRunning.value) "Tap to disconnect" else "Tap to connect",
+                text = if (isRunning.value) tr("Tap to disconnect", "Нажмите, чтобы отключиться")
+                else tr("Tap to connect", "Нажмите, чтобы подключиться"),
                 color = Color.White.copy(alpha = 0.55f),
                 fontSize = 13.sp
             )
 
             Spacer(Modifier.height(18.dp))
             Text(
-                text = active?.name ?: "No profile",
+                text = active?.name ?: tr("No profile", "Нет профиля"),
                 color = Color.White,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
@@ -337,6 +432,20 @@ fun HomeScreen(
             )
 
             Spacer(Modifier.height(30.dp))
+            SubscriptionCard(
+                active = active,
+                status = importStatus,
+                onPaste = { pasteFromClipboard() },
+                onQr = { qrLauncher.launch(qrOptions) },
+                onManual = { showManual = true },
+                onRefresh = {
+                    val url = active?.config?.subscriptionUrl.orEmpty()
+                    if (url.isNotBlank()) importSubscriptionText(url)
+                    else importStatus = tr("No subscription on this profile",
+                                           "У этого профиля нет подписки")
+                },
+            )
+            Spacer(Modifier.height(18.dp))
             ProfilesSection(
                 profiles = profiles,
                 activeId = activeId,
@@ -347,19 +456,100 @@ fun HomeScreen(
             Spacer(Modifier.height(24.dp))
         }
     }
+
+    if (showManual) {
+        AlertDialog(
+            onDismissRequest = { showManual = false },
+            title = { Text(tr("Add subscription", "Добавить подписку")) },
+            text = {
+                OutlinedTextField(
+                    value = manualText,
+                    onValueChange = { manualText = it },
+                    minLines = 4,
+                    maxLines = 8,
+                    label = { Text(tr("Subscription URL or JSON", "URL подписки или JSON")) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF4DA3FF),
+                        cursorColor = Color(0xFF4DA3FF),
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showManual = false
+                    importSubscriptionText(manualText)
+                    manualText = ""
+                }) { Text(tr("Add", "Добавить")) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showManual = false }) {
+                    Text(tr("Cancel", "Отмена"))
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SubscriptionCard(
+    active: VpnProfile?,
+    status: String,
+    onPaste: () -> Unit,
+    onQr: () -> Unit,
+    onManual: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    val cfg = active?.config
+    val name = cfg?.subscriptionName.orEmpty()
+        .ifBlank { cfg?.userId?.take(8)?.let { "ID $it" } ?: tr("No subscription", "Нет подписки") }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF141A2E)),
+        border = BorderStroke(1.dp, Color(0xFF4DA3FF).copy(alpha = 0.25f))
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(tr("Subscription", "Подписка"), color = Color.White,
+                 fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(name, color = Color(0xFF9CC9FF), fontSize = 13.sp)
+            val subUrlText = cfg?.subscriptionUrl
+            if (!subUrlText.isNullOrBlank()) {
+                Text(subUrlText, color = Color.White.copy(alpha = 0.45f),
+                     fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onPaste, modifier = Modifier.weight(1f)) {
+                    Text(tr("Paste", "Вставить"))
+                }
+                Button(onClick = onQr, modifier = Modifier.weight(1f)) {
+                    Text("QR")
+                }
+                Button(onClick = onManual, modifier = Modifier.weight(1f)) {
+                    Text(tr("Manual", "Вручную"))
+                }
+            }
+            if (!cfg?.subscriptionUrl.isNullOrBlank()) {
+                TextButton(onClick = onRefresh, contentPadding = PaddingValues(0.dp)) {
+                    Text(tr("Refresh subscription", "Обновить подписку"), fontSize = 12.sp)
+                }
+            }
+            if (status.isNotEmpty()) {
+                Text(
+                    status, fontSize = 12.sp,
+                    color = if (status.startsWith("OK")) Color(0xFF34D399) else Color(0xFFFFB74D)
+                )
+            }
+        }
+    }
 }
 
 @Composable
 private fun HomeHeader(onOpenSettings: () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(
-                "Short Polling VPN",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text("Secure tunnel", color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
+            Text("Short Polling VPN", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(tr("Secure tunnel", "Защищённый туннель"),
+                 color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
         }
         IconButton(onClick = onOpenSettings) {
             Icon(
@@ -384,7 +574,7 @@ private fun StatusPill(running: Boolean) {
     ) {
         Box(Modifier.size(8.dp).clip(CircleShape).background(color))
         Text(
-            text = if (running) "Connected" else "Disconnected",
+            text = if (running) tr("Connected", "Подключено") else tr("Disconnected", "Отключено"),
             color = color,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium
@@ -488,11 +678,11 @@ private fun ProfilesSection(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f)
             )
-            TextButton(onClick = onManageProfiles) { Text("Manage") }
+            TextButton(onClick = onManageProfiles) { Text(tr("Manage", "Управление")) }
         }
         if (running) {
             Text(
-                "Reconnect to apply profile changes",
+                tr("Reconnect to apply profile changes", "Переподключитесь, чтобы применить изменения"),
                 color = Color.White.copy(alpha = 0.45f),
                 fontSize = 11.sp
             )
@@ -558,6 +748,16 @@ private fun ProfileCard(profile: VpnProfile, active: Boolean, onClick: () -> Uni
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                val subName = profile.config.subscriptionName
+                if (subName.isNotBlank()) {
+                    Text(
+                        text = tr("Subscription: ", "Подписка: ") + subName,
+                        color = Color(0xFF7DB7FF),
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
             RadioButton(
                 selected = active,
@@ -589,6 +789,7 @@ fun SettingsScreen(
     urlStatus: List<UrlRuntimeStatus>,
     isRunning: Boolean,
     onResetUrlErrors: () -> Unit,
+    onRestartVpn: () -> Unit,
     onTabChange: (Int) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -598,33 +799,43 @@ fun SettingsScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("Settings") },
+                title = { Text(tr("Settings", "Настройки")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.Default.ArrowBack, contentDescription = tr("Back", "Назад"))
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onRestartVpn) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = tr("Restart VPN", "Перезапустить VPN")
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                     titleContentColor = MaterialTheme.colorScheme.onSurface,
                     navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.onSurface,
                 )
             )
         },
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
+            LanguageRow()
             TabRow(
                 selectedTabIndex = selectedTab,
                 containerColor = MaterialTheme.colorScheme.surface
             ) {
                 Tab(selected = selectedTab == 0, onClick = { onTabChange(0) },
-                    text = { Text("Profiles") })
+                    text = { Text(tr("Profiles", "Профили")) })
                 Tab(selected = selectedTab == 1, onClick = { onTabChange(1) },
-                    text = { Text("Connection") })
+                    text = { Text(tr("Connection", "Подключение")) })
                 Tab(selected = selectedTab == 2, onClick = { onTabChange(2) },
-                    text = { Text("Advanced") })
+                    text = { Text(tr("Advanced", "Продвинутое")) })
                 Tab(selected = selectedTab == 3, onClick = { onTabChange(3) },
-                    text = { Text("Logs") })
+                    text = { Text(tr("Logs", "Логи")) })
             }
             when (selectedTab) {
                 0 -> ProfilesTab(configManager, installedApps)
@@ -637,6 +848,45 @@ fun SettingsScreen(
 }
 
 // ── Simple config tab ─────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LanguageRow() {
+    val context = LocalContext.current
+    val prefs = context.getSharedPreferences("vpnproxy", Context.MODE_PRIVATE)
+    var current by remember { mutableStateOf(prefs.getString("language", "en") ?: "en") }
+
+    fun apply(lang: String) {
+        current = lang
+        prefs.edit().putString("language", lang).apply()
+        val activity = context as? MainActivity ?: return
+        activity.recreate()
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            tr("Language:", "Язык:"),
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        FilterChip(
+            selected = current == "en",
+            onClick = { apply("en") },
+            label = { Text("English") }
+        )
+        FilterChip(
+            selected = current == "ru",
+            onClick = { apply("ru") },
+            label = { Text("Русский") }
+        )
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -660,7 +910,7 @@ fun SimpleConfigTab(
     fun applySubscription() {
         val url = subUrl.trim()
         if (url.isEmpty()) return
-        subStatus = "Загрузка..."
+        subStatus = tr("Loading…", "Загрузка…")
         val baseCfg = cfg
         save(baseCfg.copy(subscriptionUrl = url, subscriptionFile = ""))
         scope.launch {
@@ -672,75 +922,22 @@ fun SimpleConfigTab(
                     conn.setRequestProperty("User-Agent", "vpn-client/1.0")
                     val code = conn.responseCode
                     if (code !in 200..299) {
-                        Pair("Ошибка: HTTP $code", null)
+                        Pair(tr("Error: HTTP $code", "Ошибка: HTTP $code"), null)
                     } else {
                         val text = conn.inputStream.bufferedReader().use { it.readText() }
                         val sub = org.json.JSONObject(text)
-                        val user = sub.optJSONObject("user") ?: org.json.JSONObject()
-                        val uuid = user.optString("uuid")
-                        val secret = user.optString("secret")
-                        if (uuid.isBlank() || secret.isBlank()) {
-                            Pair("Ошибка: в подписке нет user.uuid/user.secret", null)
-                        } else {
-                            val nodes = sub.optJSONArray("nodes") ?: org.json.JSONArray()
-                            val urls = (0 until nodes.length()).mapNotNull { i ->
-                                nodes.optJSONObject(i)?.optString("url")?.takeIf { it.isNotBlank() }
-                            }
-                            val profilesArr = sub.optJSONArray("profiles")
-                            val profileCount = profilesArr?.length() ?: 0
-                            val routeNames = mutableListOf<String>()
-                            if (profilesArr != null) {
-                                for (i in 0 until profilesArr.length()) {
-                                    val routes = profilesArr.optJSONObject(i)?.optJSONArray("routes")
-                                    if (routes != null) {
-                                        for (j in 0 until routes.length()) {
-                                            val n = routes.optJSONObject(j)?.optString("name") ?: ""
-                                            if (n.isNotBlank()) routeNames.add(n)
-                                        }
-                                    }
-                                }
-                            }
-                            val split = sub.optJSONObject("split_routing")
-                            val actions = split?.optJSONObject("actions")
-                            val ruAction = actions?.optJSONObject("ru")
-                            val nonRuAction = actions?.optJSONObject("non_ru")
-                            val privateAction = actions?.optJSONObject("private")
-                            val ruRoute = when {
-                                ruAction?.optBoolean("direct", false) == true -> "direct"
-                                else -> ruAction?.optString("route", "") ?: ""
-                            }
-                            val nonRuRoute = when {
-                                nonRuAction?.optBoolean("direct", false) == true -> "direct"
-                                else -> nonRuAction?.optString("route", "") ?: ""
-                            }
-                            val privateRoute = when {
-                                privateAction?.optBoolean("direct", false) == true -> "direct"
-                                else -> privateAction?.optString("route", "") ?: ""
-                            }
-                            val updated = baseCfg.copy(
-                                subscriptionUrl = url,
-                                subscriptionFile = "",
-                                userId = uuid,
-                                userSecret = secret,
-                                serverUrl = urls.firstOrNull() ?: baseCfg.serverUrl,
-                                serverUrls = urls.ifEmpty { baseCfg.serverUrls },
-                                routingEnabled = baseCfg.routingEnabled || (split?.optBoolean("enabled", false) == true),
-                                routingOptions = if (routeNames.isNotEmpty())
-                                    routeNames.distinct().joinToString("|") else baseCfg.routingOptions,
-                                routeRu = baseCfg.routeRu.ifBlank { ruRoute },
-                                routeNonRu = baseCfg.routeNonRu.ifBlank { nonRuRoute },
-                                routePrivate = if (baseCfg.routePrivate.isBlank())
-                                    privateRoute.ifBlank { "direct" } else baseCfg.routePrivate
-                            )
-                            Pair("OK: узлов ${urls.size}, профилей $profileCount", updated)
-                        }
+                        val profile = configManager.importSubscription(sub, url)
+                        val urls = profile.config.serverUrls
+                        Pair(tr("OK: ${profile.name} (${urls.size} nodes)",
+                                "OK: ${profile.name} (узлов ${urls.size})"), profile.config)
                     }
                 } catch (e: Exception) {
-                    Pair("Ошибка: ${e.message ?: e.javaClass.simpleName}", null)
+                    Pair(tr("Error: ${e.message ?: e.javaClass.simpleName}",
+                            "Ошибка: ${e.message ?: e.javaClass.simpleName}"), null)
                 }
             }
             val updated = result.second
-            if (updated != null) save(updated)
+            if (updated != null) cfg = updated
             subStatus = result.first
         }
     }
@@ -752,7 +949,7 @@ fun SimpleConfigTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Subscription",
+        Text(tr("Subscription", "Подписка"),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -766,7 +963,7 @@ fun SimpleConfigTab(
                 },
                 modifier = Modifier.weight(1f),
                 singleLine = true,
-                label = { Text("Subscription URL") },
+                label = { Text(tr("Subscription URL", "URL подписки")) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -775,7 +972,7 @@ fun SimpleConfigTab(
                 )
             )
             Button(onClick = { applySubscription() }, enabled = subUrl.isNotBlank()) {
-                Text("Загрузить")
+                Text(tr("Load", "Загрузить"))
             }
         }
         if (cfg.userId.isNotBlank()) {
@@ -792,10 +989,10 @@ fun SimpleConfigTab(
         Text("Подписка обновляется при каждом подключении; узлы и маршруты приходят с сервера.",
              fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
 
-        Text("Routing",
+        Text(tr("Routing", "Маршрутизация"),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Split routing", color = MaterialTheme.colorScheme.onSurface,
+            Text(tr("Split routing", "Раздельная маршрутизация"), color = MaterialTheme.colorScheme.onSurface,
                  modifier = Modifier.weight(1f))
             Switch(
                 checked = cfg.routingEnabled,
@@ -826,7 +1023,7 @@ fun SimpleConfigTab(
             }
         }
 
-        Text("Server URLs:",
+        Text(tr("Server URLs:", "Серверные URL:"),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
         cfg.effectiveServerUrls().forEachIndexed { i, url ->
             Row(verticalAlignment = Alignment.CenterVertically,
@@ -888,22 +1085,22 @@ fun SimpleConfigTab(
         Button(onClick = {
             val list = cfg.effectiveServerUrls() + ""
             save(cfg.copy(serverUrl = list.first(), serverUrls = list))
-        }) { Text("+ Add URL") }
+        }) { Text(tr("+ Add URL", "+ Добавить URL")) }
 
         UrlStatusSection(cfg, runtimeStatus, isRunning, onResetUrlErrors)
 
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("URL select:", color = MaterialTheme.colorScheme.onSurface)
+            Text(tr("URL select:", "Выбор URL:"), color = MaterialTheme.colorScheme.onSurface)
             FilterChip(
                 selected = cfg.serverSelector == "round",
                 onClick = { save(cfg.copy(serverSelector = "round")) },
-                label = { Text("Round") }
+                label = { Text(tr("Round", "По кругу")) }
             )
             FilterChip(
                 selected = cfg.serverSelector == "random",
                 onClick = { save(cfg.copy(serverSelector = "random")) },
-                label = { Text("Random") }
+                label = { Text(tr("Random", "Случайно")) }
             )
         }
 
@@ -937,7 +1134,7 @@ fun SimpleConfigTab(
 
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Method:", color = MaterialTheme.colorScheme.onSurface)
+            Text(tr("Method:", "Метод:"), color = MaterialTheme.colorScheme.onSurface)
             FilterChip(
                 selected = cfg.pollMethod == "GET",
                 onClick = { save(cfg.copy(pollMethod = "GET")) },
@@ -952,7 +1149,7 @@ fun SimpleConfigTab(
 
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Data in:", color = MaterialTheme.colorScheme.onSurface)
+            Text(tr("Data in:", "Данные в:"), color = MaterialTheme.colorScheme.onSurface)
             FilterChip(
                 selected = cfg.pollDataIn == "body",
                 onClick = { save(cfg.copy(pollDataIn = "body")) },
@@ -967,14 +1164,14 @@ fun SimpleConfigTab(
 
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Verify TLS:", color = MaterialTheme.colorScheme.onSurface)
+            Text(tr("Verify TLS:", "Проверять TLS:"), color = MaterialTheme.colorScheme.onSurface)
             Switch(checked = cfg.verifyTls,
                 onCheckedChange = { save(cfg.copy(verifyTls = it)) })
         }
 
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Log level:", color = MaterialTheme.colorScheme.onSurface)
+            Text(tr("Log level:", "Уровень логов:"), color = MaterialTheme.colorScheme.onSurface)
             FilterChip(
                 selected = cfg.loggingLevel == "DEBUG",
                 onClick = { save(cfg.copy(loggingLevel = "DEBUG")) },
@@ -987,11 +1184,11 @@ fun SimpleConfigTab(
             )
         }
 
-        Text("Idle timeout:",
+        Text(tr("Idle timeout:", "Idle-таймаут:"),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Enabled:", color = MaterialTheme.colorScheme.onSurface)
+            Text(tr("Enabled:", "Включено:"), color = MaterialTheme.colorScheme.onSurface)
             Switch(checked = cfg.idleTimeoutEnabled,
                 onCheckedChange = { save(cfg.copy(idleTimeoutEnabled = it)) })
             Spacer(Modifier.weight(1f))
@@ -1001,11 +1198,11 @@ fun SimpleConfigTab(
             ) { it.toIntOrNull()?.let { v -> save(cfg.copy(idleTimeoutSeconds = v)) } }
         }
 
-        Text("DNS relay:",
+        Text(tr("DNS relay:", "DNS-релей:"),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Enabled:", color = MaterialTheme.colorScheme.onSurface)
+            Text(tr("Enabled:", "Включено:"), color = MaterialTheme.colorScheme.onSurface)
             Switch(checked = cfg.dnsRelayEnabled,
                 onCheckedChange = { save(cfg.copy(dnsRelayEnabled = it)) })
             Spacer(Modifier.weight(1f))
@@ -1103,7 +1300,7 @@ fun UrlStatusSection(
                     modifier = Modifier.weight(1f)
                 )
                 TextButton(onClick = onResetErrors, enabled = isRunning) {
-                    Text("Reset errors", fontSize = 12.sp)
+                    Text(tr("Reset errors", "Сбросить ошибки"), fontSize = 12.sp)
                 }
             }
 
@@ -1206,9 +1403,9 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Profiles", style = MaterialTheme.typography.titleMedium,
+        Text(tr("Profiles", "Профили"), style = MaterialTheme.typography.titleMedium,
              color = MaterialTheme.colorScheme.onSurface)
-        Text("Each profile stores mode, connection settings and routing. Switch, then Stop/Start to apply.",
+        Text(tr("Each profile stores mode, connection settings and routing. Switch, then Stop/Start to apply.", "Каждый профиль хранит режим, настройки подключения и маршрутизацию. Переключите и перезапустите VPN."),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
 
         // Profile selector cards: tap makes active + editable
@@ -1237,7 +1434,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
                              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
                     }
                     if (isActive) {
-                        Text("ACTIVE", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                        Text(tr("ACTIVE", "АКТИВЕН"), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
                     }
                     TextButton(onClick = {
                         pendingDelete = p
@@ -1251,16 +1448,16 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
         pendingDelete?.let { doomed ->
             AlertDialog(
                 onDismissRequest = { pendingDelete = null },
-                title = { Text("Delete profile") },
+                title = { Text(tr("Delete profile", "Удалить профиль")) },
                 text = { Text("Delete \"${doomed.name}\"? This cannot be undone.") },
                 confirmButton = {
                     TextButton(onClick = {
                         configManager.deleteProfile(doomed.id)
                         pendingDelete = null
                         refresh()
-                    }) { Text("Delete") }
+                    }) { Text(tr("Delete", "Удалить")) }
                 },
-                dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } }
+                dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text(tr("Cancel", "Отмена")) } }
             )
         }
 
@@ -1274,25 +1471,25 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
             Button(
                 onClick = { dialogKind = "new"; showNameDialog = true },
                 modifier = Modifier.weight(1f)
-            ) { Text("New", maxLines = 1, fontSize = 13.sp) }
+            ) { Text(tr("New", "Новый"), maxLines = 1, fontSize = 13.sp) }
             Button(
                 onClick = { dialogKind = "rename"; showNameDialog = true },
                 modifier = Modifier.weight(1f)
-            ) { Text("Rename", maxLines = 1, fontSize = 13.sp) }
+            ) { Text(tr("Rename", "Переименовать"), maxLines = 1, fontSize = 13.sp) }
             Button(
                 onClick = { dialogKind = "duplicate"; showNameDialog = true },
                 modifier = Modifier.weight(1f)
-            ) { Text("Duplicate", maxLines = 1, fontSize = 12.sp) }
+            ) { Text(tr("Duplicate", "Дублировать"), maxLines = 1, fontSize = 12.sp) }
         }
 
         // Mode selection
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Mode:", color = MaterialTheme.colorScheme.onSurface)
+            Text(tr("Mode:", "Режим:"), color = MaterialTheme.colorScheme.onSurface)
             FilterChip(
                 selected = editing.mode == "proxy",
                 onClick = { persist(editing.copy(mode = "proxy")) },
-                label = { Text("Proxy") }
+                label = { Text(tr("Proxy", "Прокси")) }
             )
             FilterChip(
                 selected = editing.mode == "vpn",
@@ -1301,27 +1498,27 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
             )
         }
         if (editing.mode == "vpn") {
-            Text("VPN mode uses system-wide capture (VpnService). Traffic is routed per your app rules below.",
+            Text(tr("VPN mode uses system-wide capture (VpnService). Traffic is routed per your app rules below.", "VPN-режим перехватывает весь трафик (VpnService) по правилам ниже."),
                  color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
         }
 
         // Routing rules
-        Text("Traffic routing:", color = MaterialTheme.colorScheme.onSurface)
+        Text(tr("Traffic routing:", "Маршрутизация трафика:"), color = MaterialTheme.colorScheme.onSurface)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             FilterChip(
                 selected = editing.routing.mode == "all",
                 onClick = { persist(editing.copy(routing = editing.routing.copy(mode = "all"))) },
-                label = { Text("All apps") }
+                label = { Text(tr("All apps", "Все приложения")) }
             )
             FilterChip(
                 selected = editing.routing.mode == "allow",
                 onClick = { persist(editing.copy(routing = editing.routing.copy(mode = "allow"))) },
-                label = { Text("Allow list") }
+                label = { Text(tr("Allow list", "Белый список")) }
             )
             FilterChip(
                 selected = editing.routing.mode == "block",
                 onClick = { persist(editing.copy(routing = editing.routing.copy(mode = "block"))) },
-                label = { Text("Block list") }
+                label = { Text(tr("Block list", "Чёрный список")) }
             )
         }
 
@@ -1336,7 +1533,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
             Button(onClick = {
                 pickerList = editing.routing.mode
                 showAppPicker = true
-            }) { Text("Add app") }
+            }) { Text(tr("Add app", "Добавить приложение")) }
             activeRules.forEach { rule ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("${rule.appName} (${rule.packageName})", Modifier.weight(1f),
@@ -1354,7 +1551,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
         }
 
         Divider()
-        Text("Changes apply after Stop/Start.",
+        Text(tr("Changes apply after Stop/Start.", "Изменения применяются после перезапуска."),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp)
     }
 
@@ -1396,7 +1593,7 @@ fun ProfilesTab(configManager: ConfigManager, installedApps: List<AppRule>) {
                     showNameDialog = false
                 }) { Text("OK") }
             },
-            dismissButton = { TextButton(onClick = { showNameDialog = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { showNameDialog = false }) { Text(tr("Cancel", "Отмена")) } }
         )
     }
 
@@ -1448,18 +1645,18 @@ fun AppPickerDialog(apps: List<AppRule>, onDismiss: () -> Unit, onPick: (AppRule
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Select app") },
+        title = { Text(tr("Select app", "Выбрать приложение")) },
         text = {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = showSystem, onCheckedChange = { showSystem = it })
-                    Text("Show system apps", color = MaterialTheme.colorScheme.onSurface)
+                    Text(tr("Show system apps", "Показывать системные приложения"), color = MaterialTheme.colorScheme.onSurface)
                 }
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
                     singleLine = true,
-                    label = { Text("Search") },
+                    label = { Text(tr("Search", "Поиск")) },
                     colors = OutlinedTextFieldDefaults.colors(cursorColor = MaterialTheme.colorScheme.primary)
                 )
                 Spacer(Modifier.height(8.dp))
@@ -1477,7 +1674,7 @@ fun AppPickerDialog(apps: List<AppRule>, onDismiss: () -> Unit, onPick: (AppRule
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+        dismissButton = { TextButton(onClick = onDismiss) { Text(tr("Cancel", "Отмена")) } }
     )
 }
 
@@ -1501,11 +1698,11 @@ fun RawConfigTab(configManager: ConfigManager) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text("Edit full config (JSON). Server block is ignored.",
+        Text(tr("Edit full config (JSON). Server block is ignored.", "Редактирование полного JSON. Блок server игнорируется."),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
              fontSize = 13.sp)
 
-        Text("URL quarantine",
+        Text(tr("URL quarantine", "Карантин URL"),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
              fontSize = 13.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1532,7 +1729,7 @@ fun RawConfigTab(configManager: ConfigManager) {
                 }
             }
         }
-        Text("After this many consecutive errors a URL is quarantined for the given time.",
+        Text(tr("After this many consecutive errors a URL is quarantined for the given time.", "После стольких ошибок подряд URL уходит в карантин на указанное время."),
              color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
              fontSize = 11.sp)
 
@@ -1572,7 +1769,7 @@ fun RawConfigTab(configManager: ConfigManager) {
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Save Config")
+            Text(tr("Save Config", "Сохранить конфиг"))
         }
     }
 }
@@ -1610,7 +1807,7 @@ fun LogTab(logs: SnapshotStateList<LogEntry>, autoScroll: Boolean, onAutoScrollC
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Auto-scroll:", fontSize = 12.sp,
+            Text(tr("Auto-scroll:", "Автопрокрутка:"), fontSize = 12.sp,
                  color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
             Checkbox(checked = autoScroll, onCheckedChange = onAutoScrollChange,
                      modifier = Modifier.height(24.dp))
@@ -1709,4 +1906,16 @@ fun resetUrlErrors(context: Context) {
         action = ProxyService.ACTION_RESET_URL_ERRORS
     }
     context.startService(intent)
+}
+
+fun restartProxy(context: Context) {
+    if (ProxyService.isProxyRunning) {
+        context.startService(Intent(context, ProxyService::class.java).apply {
+            action = ProxyService.ACTION_STOP
+        })
+    }
+    Handler(Looper.getMainLooper()).postDelayed({
+        val activity = context as? MainActivity
+        if (activity != null) activity.startProxyWithVpnCheck() else startProxy(context)
+    }, 900)
 }

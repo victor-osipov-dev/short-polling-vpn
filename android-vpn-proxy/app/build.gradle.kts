@@ -63,6 +63,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-service:2.7.0")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
 

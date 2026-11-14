@@ -36,6 +36,7 @@ data class ProxyConfig(
     val deviceId: String = "",
     val subscriptionUrl: String = "",
     val subscriptionFile: String = "",
+    val subscriptionName: String = "",
     val routingEnabled: Boolean = false,
     val routeRu: String = "",
     val routeNonRu: String = "",
@@ -48,10 +49,11 @@ data class ProxyConfig(
     fun toJson(): JSONObject {
         return JSONObject().apply {
             put("mode", "client")
-            if (subscriptionUrl.isNotBlank() || subscriptionFile.isNotBlank()) {
+            if (subscriptionUrl.isNotBlank() || subscriptionFile.isNotBlank() || subscriptionName.isNotBlank()) {
                 put("subscription", JSONObject().apply {
                     put("url", subscriptionUrl)
                     put("file", subscriptionFile)
+                    put("name", subscriptionName)
                 })
             }
             if (userId.isNotBlank() || userSecret.isNotBlank() || deviceId.isNotBlank()) {
@@ -157,6 +159,7 @@ data class ProxyConfig(
                 deviceId = user.optString("device_id", defaults.deviceId),
                 subscriptionUrl = subscription.optString("url", defaults.subscriptionUrl),
                 subscriptionFile = subscription.optString("file", defaults.subscriptionFile),
+                subscriptionName = subscription.optString("name", defaults.subscriptionName),
                 routingEnabled = routing.optBoolean("enabled", defaults.routingEnabled),
                 routeRu = routing.optString("ru", defaults.routeRu),
                 routeNonRu = routing.optString("non_ru", defaults.routeNonRu),
@@ -304,6 +307,70 @@ class ConfigManager(private val context: Context) {
 
     fun writeEngineConfig(profile: VpnProfile) {
         configFile.writeText(profile.config.toPrettyJson())
+    }
+
+    /** Импорт подписки: создаёт/обновляет профиль и делает его активным. */
+    fun importSubscription(sub: JSONObject, sourceUrl: String = ""): VpnProfile {
+        val user = sub.optJSONObject("user") ?: JSONObject()
+        val uuid = user.optString("uuid", "")
+        val secret = user.optString("secret", "")
+        val userName = user.optString("name", "")
+        val subBlock = sub.optJSONObject("subscription") ?: JSONObject()
+        val url = sourceUrl.trim().ifBlank { subBlock.optString("url", "") }
+
+        val nodes = sub.optJSONArray("nodes") ?: JSONArray()
+        val nodeUrls = (0 until nodes.length()).mapNotNull { i ->
+            nodes.optJSONObject(i)?.optString("url")?.trim()?.takeIf { it.isNotEmpty() }
+        }
+        val profilesArr = sub.optJSONArray("profiles") ?: JSONArray()
+        val routeNames = mutableListOf<String>()
+        for (i in 0 until profilesArr.length()) {
+            val routes = profilesArr.optJSONObject(i)?.optJSONArray("routes") ?: continue
+            for (j in 0 until routes.length()) {
+                val n = routes.optJSONObject(j)?.optString("name", "") ?: ""
+                if (n.isNotBlank()) routeNames.add(n)
+            }
+        }
+        val split = sub.optJSONObject("split_routing") ?: JSONObject()
+        val actions = split.optJSONObject("actions") ?: JSONObject()
+        fun action(name: String): String {
+            val a = actions.optJSONObject(name) ?: return ""
+            if (a.optBoolean("direct", false)) return "direct"
+            return a.optString("route", "")
+        }
+
+        val display = userName.ifBlank {
+            url.removePrefix("https://").removePrefix("http://")
+                .substringBefore("/").ifBlank { "Subscription" }
+        }
+        val existing = loadProfiles().firstOrNull {
+            (url.isNotBlank() && it.config.subscriptionUrl == url) ||
+                (uuid.isNotBlank() && it.config.userId == uuid)
+        }
+        val base = existing?.config ?: getActiveProfile().config
+        val deviceId = base.deviceId.ifBlank { UUID.randomUUID().toString() }
+        val updated = base.copy(
+            subscriptionUrl = url,
+            subscriptionFile = "",
+            subscriptionName = display,
+            userId = uuid.ifBlank { base.userId },
+            userSecret = secret.ifBlank { base.userSecret },
+            deviceId = deviceId,
+            serverUrl = nodeUrls.firstOrNull() ?: base.serverUrl,
+            serverUrls = nodeUrls.ifEmpty { base.serverUrls },
+            routingEnabled = split.optBoolean("enabled", false) || base.routingEnabled,
+            routingOptions = if (routeNames.isNotEmpty())
+                routeNames.distinct().joinToString("|") else base.routingOptions,
+            routeRu = base.routeRu.ifBlank { action("ru") },
+            routeNonRu = base.routeNonRu.ifBlank { action("non_ru") },
+            routePrivate = if (base.routePrivate.isBlank())
+                action("private").ifBlank { "direct" } else base.routePrivate
+        )
+        val profile = if (existing != null) existing.copy(config = updated)
+        else VpnProfile(name = display, config = updated)
+        if (existing != null) updateProfile(profile) else addProfile(profile)
+        selectProfile(profile.id)
+        return profile
     }
 
     // ── Legacy API (Simple tab + service) ─────────────────────────────
