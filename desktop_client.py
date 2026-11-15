@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -29,18 +30,23 @@ logger = logging.getLogger("vpn-client")
 
 # ── HTTP CONNECT прокси-сервер (desktop-only) ──
 
-async def _http_connect_handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    """Парсит HTTP CONNECT запрос и возвращает (host, port)."""
+async def _read_head(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
+    """Читает заголовки запроса: (head, уже прочитанный остаток после CRLFCRLF)."""
     buf = b""
-    while True:
+    while b"\r\n\r\n" not in buf:
         chunk = await reader.read(4096)
         if not chunk:
             raise ConnectionError("connection closed during HTTP handshake")
         buf += chunk
-        if b"\r\n\r\n" in buf:
-            break
-    first_line_end = buf.index(b"\r\n")
-    first_line = buf[:first_line_end].decode("utf-8", errors="replace")
+    head, rest = buf.split(b"\r\n\r\n", 1)
+    return head, rest
+
+
+async def _http_connect_handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Парсит HTTP CONNECT запрос и возвращает (host, port)."""
+    head, _rest = await _read_head(reader)
+    first_line_end = head.index(b"\r\n") if b"\r\n" in head else len(head)
+    first_line = head[:first_line_end].decode("utf-8", errors="replace")
     parts = first_line.split()
     if len(parts) < 3 or parts[0].upper() != "CONNECT":
         raise ConnectionError(f"not a CONNECT request: {first_line[:100]}")
@@ -55,49 +61,205 @@ async def _http_connect_handshake(reader: asyncio.StreamReader, writer: asyncio.
     return host, port
 
 
+async def _pump_from_client(tunnel: ClientTunnel, sid: bytes,
+                            reader: asyncio.StreamReader):
+    """Переливает данные от клиента в туннель до закрытия соединения."""
+    try:
+        while True:
+            data = await reader.read(4096)
+            if not data:
+                break
+            await tunnel.feed_outgoing(sid, data)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+    finally:
+        await tunnel.mark_closed(sid)
+
+
+def _split_host_port(value: str, default_port: int) -> tuple[str, int]:
+    if value.startswith("["):  # [ipv6]:port
+        host, _, rest = value[1:].partition("]")
+        port = int(rest.lstrip(":")) if rest.lstrip(":") else default_port
+        return host, port
+    if value.count(":") == 1:
+        host, port_str = value.rsplit(":", 1)
+        return host, int(port_str)
+    return value, default_port
+
+
+def _select_route(tunnel: ClientTunnel, host: str) -> tuple:
+    """Маршрут для host: (mode, entry_url, route_ids, category[, reason])."""
+    if not hasattr(tunnel, "route_for"):
+        return "tunnel", None, (), None
+    try:
+        return tunnel.route_for(host)
+    except Exception as exc:
+        logger.error("route_for(%s) failed: %s", host, exc)
+        return "error", None, (), None, f"route selection failed: {exc}"
+
+
+async def _pump_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Односторонний relay до EOF или ошибки."""
+    try:
+        while True:
+            data = await reader.read(16384)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+async def _direct_relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                        host: str, port: int, initial: bytes = b"") -> bool:
+    """Прямое соединение без туннеля — для правил «direct»."""
+    try:
+        remote_r, remote_w = await asyncio.open_connection(host, port)
+    except Exception as exc:
+        logger.error("direct connect %s:%s failed: %s", host, port, exc)
+        return False
+    if initial:
+        try:
+            remote_w.write(initial)
+            await remote_w.drain()
+        except Exception as exc:
+            logger.error("direct send %s:%s failed: %s", host, port, exc)
+            remote_w.close()
+            return False
+    asyncio.create_task(_pump_stream(remote_r, writer))
+    asyncio.create_task(_pump_stream(reader, remote_w))
+    return True
+
+
 async def handle_http_client(tunnel: ClientTunnel, reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter):
     from socks5_server import enable_tcp_keepalive
 
     peer = writer.get_extra_info("peername")
     try:
-        host, port = await _http_connect_handshake(reader, writer)
+        head, rest = await _read_head(reader)
     except Exception as e:
-        logger.error("http connect handshake failed from %s: %s", peer, e)
+        logger.error("http handshake failed from %s: %s", peer, e)
+        writer.close()
+        return
+
+    first_line = head.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+    parts = first_line.split()
+
+    if len(parts) >= 3 and parts[0].upper() == "CONNECT":
         try:
-            writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            host, port = _split_host_port(parts[1], 443)
+        except Exception as e:
+            logger.error("http connect handshake failed from %s: %s", peer, e)
+            try:
+                writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                await writer.drain()
+            except Exception:
+                pass
+            writer.close()
+            return
+
+        route = _select_route(tunnel, host)
+        if route[0] == "error":
+            reason = route[4] if len(route) > 4 else "route unavailable"
+            logger.error("HTTP CONNECT %s:%s rejected: %s", host, port, reason)
+            try:
+                writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                await writer.drain()
+            except Exception:
+                pass
+            writer.close()
+            return
+
+        try:
+            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await writer.drain()
+        except Exception as e:
+            logger.error("http connect response failed: %s", e)
+            writer.close()
+            return
+
+        if route[0] == "direct":
+            await _direct_relay(reader, writer, host, port)
+            return
+
+        sid = await tunnel.register_session(
+            writer, host, port, server_base=route[1],
+            route=route[2] if len(route) > 2 else ())
+        enable_tcp_keepalive(writer.transport)
+        asyncio.create_task(_pump_from_client(tunnel, sid, reader))
+        return
+
+    # Обычный прокси-запрос: "GET http://host/path HTTP/1.1" (так ходят
+    # Windows NCSI и http:// сайты). Переписываем на origin-form и
+    # просим сервер закрыть соединение: один запрос — одна сессия.
+    try:
+        method, target, version = parts[0], parts[1], parts[2]
+        if not target.lower().startswith("http://"):
+            raise ValueError(f"unsupported target: {target[:80]}")
+        url = urlsplit(target)
+        if not url.hostname:
+            raise ValueError("no host in target")
+        host, port = url.hostname, url.port or 80
+        path = (url.path or "/") + (f"?{url.query}" if url.query else "")
+        headers = [
+            h for h in head.split(b"\r\n")[1:]
+            if h.strip() and not h.lower().startswith(
+                (b"proxy-connection:", b"connection:"))
+        ]
+        headers.append(b"Connection: close")
+        request = (f"{method} {path} {version}".encode("latin-1")
+                   + b"\r\n" + b"\r\n".join(headers) + b"\r\n\r\n")
+    except Exception as e:
+        logger.error("http proxy request failed from %s: %s", peer, e)
+        try:
+            writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n"
+                         b"Connection: close\r\n\r\n")
             await writer.drain()
         except Exception:
             pass
         writer.close()
         return
 
-    try:
-        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        await writer.drain()
-    except Exception as e:
-        logger.error("http connect response failed: %s", e)
+    route = _select_route(tunnel, host)
+    if route[0] == "error":
+        reason = route[4] if len(route) > 4 else "route unavailable"
+        logger.error("HTTP %s %s rejected: %s", method, host, reason)
+        try:
+            writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n"
+                         b"Connection: close\r\n\r\n")
+            await writer.drain()
+        except Exception:
+            pass
         writer.close()
         return
 
-    sid = await tunnel.register_session(writer, host, port)
+    if route[0] == "direct":
+        if not await _direct_relay(reader, writer, host, port, request + rest):
+            writer.close()
+        return
+
+    sid = await tunnel.register_session(
+        writer, host, port, server_base=route[1],
+        route=route[2] if len(route) > 2 else ())
     enable_tcp_keepalive(writer.transport)
-
-    async def read_from_http():
-        try:
-            while True:
-                data = await reader.read(4096)
-                if not data:
-                    break
-                await tunnel.feed_outgoing(sid, data)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
-        finally:
-            await tunnel.mark_closed(sid)
-
-    asyncio.create_task(read_from_http())
+    try:
+        await tunnel.feed_outgoing(sid, request + rest)
+    except Exception as e:
+        logger.error("http proxy forward failed from %s: %s", peer, e)
+        writer.close()
+        return
+    asyncio.create_task(_pump_from_client(tunnel, sid, reader))
 
 
 async def run_http_proxy_server(tunnel: ClientTunnel, bind_host: str, bind_port: int):

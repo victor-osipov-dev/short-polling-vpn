@@ -140,7 +140,7 @@ class VpnGui:
 
         # ── Tk root ──
         self.root = tk.Tk()
-        self.root.title("Short Polling VPN v2.0")
+        self.root.title("Short Polling VPN")
         self.root.geometry("540x740")
         self.root.minsize(440, 620)
         self.root.configure(bg=BG_MAIN)
