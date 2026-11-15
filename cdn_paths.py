@@ -82,4 +82,17 @@ def random_cdn_path(poll_path: str) -> str:
             "?cache=" + dig(6),
             "?version=" + str(r.randint(100, 999)),
         ])
+
+    # CDN кеширует ответы по пути, игнорируя query, поэтому каждый poll должен
+    # получать уникальный URL: иначе можно навсегда «залипнуть» на закешированном
+    # фейковом ответе. Токен вставляем перед расширением, чтобы путь сохранял вид
+    # статики (по расширению CDN применяет свои правила).
+    path, sep, qs = p.partition("?")
+    head, slash, last = path.rpartition("/")
+    stem, dot, ext = last.rpartition(".")
+    if dot:
+        last = f"{stem}.{dig(6)}.{ext}"
+    else:
+        last = f"{last}-{dig(6)}" if last else dig(6)
+    p = head + slash + last + sep + qs
     return base + p

@@ -507,8 +507,11 @@ class ClientTunnel:
         params = {"t": ts}
         headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac, "X-Proto": PROTO_VERSION}
         if self.user_id:
-            headers["X-User"] = self.user_id
-            headers["X-Device"] = self.device_id
+            # CDN (TurboFlare) блокирует запросы, где в заголовке есть UUID
+            # в нижнем регистре (403, x-reason-code: 7). Верхний регистр
+            # проходит; сервер приводит значение обратно к нижнему.
+            headers["X-User"] = self.user_id.upper()
+            headers["X-Device"] = self.device_id.upper()
         if route_hdr:
             headers["X-Route"] = route_hdr
         if self.host_header:

@@ -235,6 +235,12 @@ async def relay_forward(app, request: web.Request, route: list[str],
         value = request.headers.get(key)
         if value is not None:
             headers[key] = value
+    # Клиент шлёт идентификаторы в верхнем регистре (иначе CDN отдаёт 403),
+    # а узлы-соседи могут работать на старой версии, где MAC считается по
+    # значению как есть. Опускаем регистр: MAC у клиента считался по нижнему.
+    for key in ("X-User", "X-Device"):
+        if headers.get(key):
+            headers[key] = headers[key].lower()
     headers["X-Route"] = ",".join(route)
     ts = str(int(time.time()))
     headers["X-Relay-Id"] = app.get("node_id", "")
@@ -695,8 +701,12 @@ async def poll_handler(request: web.Request):
             return web.Response(status=400, text="bad encoding")
         return fake_response(request)
 
-    user_id = request.headers.get("X-User")
-    device_id = request.headers.get("X-Device")
+    # CDN (TurboFlare) рубит запросы, где в заголовке встречается UUID в нижнем
+    # регистре, поэтому клиент отправляет идентификаторы в верхнем. Приводим к
+    # нижнему до проверки MAC и поиска пользователя — тогда старые клиенты,
+    # которые шлют обычный UUID, работают как раньше.
+    user_id = (request.headers.get("X-User") or "").strip().lower() or None
+    device_id = (request.headers.get("X-Device") or "").strip().lower() or None
     raw_route = request.headers.get("X-Route", "")
     route = _parse_route(raw_route)
     if raw_route and not route:
