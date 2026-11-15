@@ -583,6 +583,19 @@ class ClientTunnel:
                 "?cache=" + dig(6),
                 "?version=" + str(r.randint(100, 999)),
             ])
+
+        # CDN кеширует ответы по пути, игнорируя query, поэтому каждый poll
+        # должен получать уникальный URL — иначе можно залипнуть на кеше
+        # фейкового ответа. Токен ставим перед расширением, чтобы путь
+        # сохранял вид статики.
+        path, sep, qs = p.partition("?")
+        head, slash, last = path.rpartition("/")
+        stem, dot, ext = last.rpartition(".")
+        if dot:
+            last = f"{stem}.{dig(6)}.{ext}"
+        else:
+            last = f"{last}-{dig(6)}" if last else dig(6)
+        p = head + slash + last + sep + qs
         return base + p
 
     async def _poll_once(self):
@@ -689,8 +702,10 @@ class ClientTunnel:
         params = {"t": ts}
         headers = {"X-Cid": b64u_encode(self.client_id), "X-Mac": mac, "X-Proto": PROTO_VERSION}
         if self.user_id:
-            headers["X-User"] = self.user_id
-            headers["X-Device"] = self.device_id
+            # CDN (TurboFlare) отдаёт 403, если в заголовке UUID в нижнем
+            # регистре; верхний регистр проходит, сервер приводит обратно.
+            headers["X-User"] = self.user_id.upper()
+            headers["X-Device"] = self.device_id.upper()
         if route_hdr:
             headers["X-Route"] = route_hdr
 
