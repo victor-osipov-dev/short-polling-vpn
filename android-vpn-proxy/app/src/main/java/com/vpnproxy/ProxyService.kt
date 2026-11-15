@@ -132,8 +132,38 @@ class ProxyService : Service() {
 
         if (ConfigManager(this).getActiveProfile()?.mode == "vpn") {
             log("Mode is VPN, starting TunService")
-            startTunService()
+            // tun2socks стартует сразу с маршрутом на SOCKS. Если Python ещё
+            // не поднял listener, первые соединения получают "connection
+            // refused" — ждём порт, но не дольше 15 секунд.
+            val port = ConfigManager(this).getActiveProfile()?.config?.socksBindPort ?: 8888
+            Thread({
+                if (waitForSocks(port, 15_000)) {
+                    log("SOCKS5 is ready on 127.0.0.1:$port")
+                } else {
+                    log("SOCKS5 did not start in 15s; starting tun2socks anyway")
+                }
+                if (pythonStarted) startTunService()
+            }, "tun-wait").start()
         }
+    }
+
+    private fun waitForSocks(port: Int, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                java.net.Socket().use { socket ->
+                    socket.connect(java.net.InetSocketAddress("127.0.0.1", port), 300)
+                }
+                return true
+            } catch (_: Exception) {
+                try {
+                    Thread.sleep(100)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+        }
+        return false
     }
 
     private fun startTunService() {

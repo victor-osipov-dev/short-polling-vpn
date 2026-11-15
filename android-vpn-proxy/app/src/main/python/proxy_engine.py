@@ -251,7 +251,10 @@ class ClientTunnel:
 
         self.sessions: dict = {}
         self.lock = asyncio.Lock()
-        self.http = httpx.AsyncClient(http2=True, verify=verify_tls, timeout=15.0)
+        # Короткий connect timeout: недоступный узел не должен надолго
+        # задерживать poll-цикл (read timeout остаётся длинным для long-poll).
+        self.http = httpx.AsyncClient(
+            http2=True, verify=verify_tls, timeout=httpx.Timeout(15.0, connect=4.0))
         self._stop = False
         self._on_log = None
         # Смещение времени своё для каждого URL: часы серверов могут
@@ -270,6 +273,7 @@ class ClientTunnel:
         self._dns_protocol = None
         self._dns_task = None
         self._poll_count = 0
+        self._health_inflight: set[str] = set()
         self.socks_bind_host = client_cfg.get("socks5", {}).get("bind_host", "127.0.0.1")
 
     def set_log_callback(self, cb):
@@ -609,15 +613,27 @@ class ClientTunnel:
                 self._fin_outbox = []
 
             if self._dns_outbox:
+                # DNS шлём через узел, где уже есть живые сессии: так запрос
+                # не уйдёт на заведомо заблокированный URL.
+                live_bases = sorted({sess.server_base or self.server_base
+                                     for sess in self.sessions.values()})
                 for frame in self._dns_outbox:
-                    base = self._pick_server_base() or self.server_base
+                    base = (random.choice(live_bases) if live_bases
+                            else self._pick_server_base() or self.server_base)
                     groups[(base, ())].append(frame)
                 self._dns_outbox = []
             self._prune_dns_pending()
 
             available = set(self._available_urls())
-            for base in available:
-                groups.setdefault((base, ()), [])
+            # Боевые poll-запросы — только на входные узлы живых сессий.
+            # Остальные URL проверяем фоном: их таймауты не должны
+            # задерживать ни трафик, ни первый запрос после простоя.
+
+        needed = {key[0] for key in groups}
+        for base in available - needed:
+            if base not in self._health_inflight:
+                self._health_inflight.add(base)
+                asyncio.create_task(self._health_probe(base))
 
         if not groups:
             return
@@ -640,8 +656,19 @@ class ClientTunnel:
             if isinstance(r, Exception):
                 logger.error(f"poll task error: {r}")
 
+    async def _health_probe(self, url_base: str) -> None:
+        """Фоновая проверка неиспользуемого URL: карантин и выбор маршрута
+        должны видеть реальную доступность, но не тормозить трафик."""
+        try:
+            await self._poll_base(url_base, [], timeout=3.0)
+        except Exception as exc:
+            logger.debug(f"health poll error ({url_base}): {exc}")
+        finally:
+            self._health_inflight.discard(url_base)
+
     async def _poll_base(self, url_base: str, frames_to_send,
-                         route: tuple[str, ...] = ()) -> None:
+                         route: tuple[str, ...] = (),
+                         timeout: float | None = None) -> None:
         """Один poll-запрос к конкретному входному URL."""
         if self.pad_polls:
             frames_to_send = pad_frames(frames_to_send)
@@ -676,6 +703,8 @@ class ClientTunnel:
         kwargs = {"params": params, "headers": headers}
         if self.poll_data_in == "body":
             kwargs["content"] = b64u_encode(blob)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
 
         self._poll_count += 1
         if self._poll_count % 25 == 0:

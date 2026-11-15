@@ -131,7 +131,11 @@ class ClientTunnel:
 
         self.sessions: dict = {}
         self.lock = asyncio.Lock()
-        self.http = httpx.AsyncClient(http2=True, verify=verify_tls, timeout=15.0, trust_env=trust_env)
+        # Короткий connect timeout: недоступный узел не должен надолго
+        # задерживать poll-цикл (read timeout длинный для long-poll).
+        self.http = httpx.AsyncClient(
+            http2=True, verify=verify_tls, trust_env=trust_env,
+            timeout=httpx.Timeout(15.0, connect=4.0))
         self._stop = False
 
         # Смещение времени своё для каждого URL: часы серверов могут
@@ -155,6 +159,7 @@ class ClientTunnel:
         self._dns_protocol = None
         self._dns_task = None
         self._poll_count = 0
+        self._health_inflight: set[str] = set()
 
         logger.info("client_id=%s", self.client_id.hex())
 
@@ -425,17 +430,27 @@ class ClientTunnel:
                 self._fin_outbox = []
 
             if self._dns_outbox:
+                # DNS шлём через узел, где уже есть живые сессии: так запрос
+                # не уйдёт на заведомо заблокированный URL.
+                live_bases = sorted({sess.server_base or self.server_base
+                                     for sess in self.sessions.values()})
                 for frame in self._dns_outbox:
-                    base = self._pick_server_base() or self.server_base
+                    base = (random.choice(live_bases) if live_bases
+                            else self._pick_server_base() or self.server_base)
                     groups[(base, ())].append(frame)
                 self._dns_outbox = []
             self._prune_dns_pending()
 
-            # Опрашиваем все доступные URL (пустой route), чтобы забирать
-            # буферизованные ответы, плюс группы relay-маршрутов.
+            # Боевые poll-запросы — только на входные узлы живых сессий.
+            # Остальные URL проверяем фоном: их таймауты не должны
+            # задерживать ни трафик, ни первый запрос после простоя.
             available = set(self._available_urls())
-            for base in available:
-                groups.setdefault((base, ()), [])
+
+        needed = {key[0] for key in groups}
+        for base in available - needed:
+            if base not in self._health_inflight:
+                self._health_inflight.add(base)
+                asyncio.create_task(self._health_probe(base))
 
         if not groups:
             return
@@ -459,8 +474,19 @@ class ClientTunnel:
             if isinstance(r, Exception):
                 logger.error("poll task error: %s", r)
 
+    async def _health_probe(self, url_base: str) -> None:
+        """Фоновая проверка неиспользуемого URL: карантин и выбор маршрута
+        должны видеть реальную доступность, но не тормозить трафик."""
+        try:
+            await self._poll_base(url_base, [], timeout=3.0)
+        except Exception as exc:
+            logger.debug("health poll error (%s): %s", url_base, exc)
+        finally:
+            self._health_inflight.discard(url_base)
+
     async def _poll_base(self, url_base: str, frames_to_send,
-                         route: tuple[str, ...] = ()) -> None:
+                         route: tuple[str, ...] = (),
+                         timeout: float | None = None) -> None:
         """Один poll-запрос к конкретному входному URL."""
         if self.pad_polls:
             frames_to_send = pad_frames(frames_to_send)
@@ -493,6 +519,8 @@ class ClientTunnel:
         kwargs = {"params": params, "headers": headers}
         if self.poll_data_in == "body":
             kwargs["content"] = b64u_encode(blob)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
 
         self._poll_count += 1
         url = url_base + random_cdn_path(self.poll_path)
