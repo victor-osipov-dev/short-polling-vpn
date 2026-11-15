@@ -224,8 +224,14 @@ def fake_response(request) -> web.Response:
 
 
 async def relay_forward(app, request: web.Request, route: list[str],
-                        next_id: str, body: bytes) -> web.Response:
-    """Форвардит poll на следующий узел цепочки (payload не расшифровывается)."""
+                        next_id: str, body: bytes,
+                        self_id: str = "") -> web.Response:
+    """Форвардит poll на следующий узел цепочки (payload не расшифровывается).
+
+    self_id — id, под которым этот узел записан в маршруте. Он может
+    отличаться от node_id, если у сервера несколько входных имён
+    (например, прямое и через CDN); следующий узел сверяет именно его.
+    """
     base = (app.get("peers") or {}).get(next_id)
     secret = app.get("relay_secret") or ""
     if not base or not secret:
@@ -243,7 +249,7 @@ async def relay_forward(app, request: web.Request, route: list[str],
             headers[key] = headers[key].lower()
     headers["X-Route"] = ",".join(route)
     ts = str(int(time.time()))
-    headers["X-Relay-Id"] = app.get("node_id", "")
+    headers["X-Relay-Id"] = self_id or app.get("node_id", "")
     headers["X-Relay-Ts"] = ts
     headers["X-Relay-Mac"] = _relay_mac(
         app.get("relay_secret", ""), "POST", request.path_qs, route, ts, body
@@ -778,8 +784,11 @@ async def poll_handler(request: web.Request):
 
     # ── relay-цепочка ────────────────────────────────────────────────
     node_id = app.get("node_id") or ""
+    node_ids = [node_id] + [str(alias) for alias in
+                            (app.get("node_aliases") or []) if alias]
     if route:
-        if not node_id or node_id not in route:
+        idx = next((i for i, hop in enumerate(route) if hop in node_ids), -1)
+        if idx < 0:
             if debug:
                 logger.warning("403 route %s does not include node %s", route, node_id)
             return fake_response(request)
@@ -790,7 +799,6 @@ async def poll_handler(request: web.Request):
                 if debug:
                     logger.warning("403 route %s not allowed for user %s", route, user_id)
                 return fake_response(request)
-        idx = route.index(node_id)
         if idx > 0:
             relay_secret = app.get("relay_secret") or ""
             relay_id = request.headers.get("X-Relay-Id", "")
@@ -814,7 +822,8 @@ async def poll_handler(request: web.Request):
         if idx < len(route) - 1:
             if not (app.get("relay_secret") and app.get("peers")):
                 return fake_response(request)
-            return await relay_forward(app, request, route, route[idx + 1], read_body)
+            return await relay_forward(app, request, route, route[idx + 1],
+                                       read_body, route[idx])
         # idx == len(route)-1 — это exit, обрабатываем кадры локально.
 
     try:
@@ -873,6 +882,9 @@ def build_app(cfg: dict) -> web.Application:
         app["user_auth"] = UserAuth(users_cfg["db_path"], users_cfg["cluster_key"])
 
     app["node_id"] = str(cfg.get("node_id") or server_cfg.get("node_id") or "")
+    raw_aliases = cfg.get("node_aliases") or server_cfg.get("node_aliases") or []
+    app["node_aliases"] = [str(a) for a in raw_aliases] if isinstance(
+        raw_aliases, (list, tuple)) else []
     raw_peers = cfg.get("peers") or server_cfg.get("peers") or {}
     app["peers"] = ({str(k): str(v).rstrip("/") for k, v in raw_peers.items()}
                     if isinstance(raw_peers, dict) else {})
