@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Short Polling VPN — Android</title>
+<meta name="description" content="Android-клиент для short polling VPN: подписки, профили, тест соединения. Скачать APK.">
+<style>
+  :root{
+    --bg:#0b0f17; --card:#141a26; --card2:#1b2333; --text:#e8eefc; --muted:#93a1bd;
+    --accent:#4f8cff; --accent2:#22d3a6; --border:#243044; --danger:#ff7a7a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:radial-gradient(1200px 600px at 50% -200px,#1a2a4a 0%,var(--bg) 55%);
+    color:var(--text); font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,sans-serif;
+    min-height:100vh;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:920px; margin:0 auto; padding:48px 20px 64px}
+  header{text-align:center; margin-bottom:36px}
+  .logo{
+    width:64px;height:64px;margin:0 auto 16px;border-radius:18px;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    display:flex;align-items:center;justify-content:center;font-size:30px;
+    box-shadow:0 12px 30px rgba(79,140,255,.25);
+  }
+  h1{font-size:34px; margin:0 0 10px; letter-spacing:-.5px}
+  .sub{color:var(--muted); margin:0 auto; max-width:560px}
+  .cta{display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin:28px 0 8px}
+  .btn{
+    display:inline-flex;align-items:center;gap:10px;padding:14px 24px;border-radius:12px;
+    font-weight:600;border:1px solid transparent;transition:.18s;cursor:pointer;
+  }
+  .btn-primary{background:linear-gradient(135deg,var(--accent),#3b6fe0);color:#fff;box-shadow:0 10px 26px rgba(79,140,255,.28)}
+  .btn-primary:hover{transform:translateY(-1px);text-decoration:none}
+  .btn-ghost{background:transparent;color:var(--text);border-color:var(--border)}
+  .btn-ghost:hover{background:var(--card2);text-decoration:none}
+  .meta{color:var(--muted); font-size:13.5px; text-align:center}
+  .meta code{background:var(--card2);padding:2px 6px;border-radius:6px;color:var(--text)}
+  section{margin-top:36px}
+  h2{font-size:20px;margin:0 0 14px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px}
+  .release{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;
+    background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px 20px;margin-bottom:12px}
+  .release:first-child{border-color:#31517f;box-shadow:0 0 0 1px rgba(79,140,255,.15) inset}
+  .r-title{font-weight:600;font-size:17px;margin:0 0 4px}
+  .r-date{color:var(--muted);font-size:13.5px}
+  .badge{display:inline-block;font-size:11.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
+    padding:3px 8px;border-radius:999px;background:rgba(34,211,166,.14);color:var(--accent2);margin-left:8px;vertical-align:1px}
+  .badge.pre{background:rgba(255,196,0,.14);color:#ffc400}
+  .apk{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border-radius:10px;
+    background:var(--card2);border:1px solid var(--border);font-weight:600;white-space:nowrap}
+  .apk:hover{border-color:var(--accent);text-decoration:none}
+  .apk small{color:var(--muted);font-weight:400}
+  ol{padding-left:22px;margin:0}
+  ol li{margin:8px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+  .feat{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 18px}
+  .feat b{display:block;margin-bottom:4px}
+  .feat span{color:var(--muted);font-size:14.5px}
+  .note{border-left:3px solid var(--accent);background:rgba(79,140,255,.08);padding:12px 16px;border-radius:0 10px 10px 0;color:var(--muted);font-size:14.5px}
+  footer{text-align:center;color:var(--muted);font-size:13.5px;margin-top:44px}
+  .skeleton{height:74px;border-radius:16px;background:linear-gradient(90deg,#141a26,#1b2333,#141a26);
+    background-size:200% 100%;animation:sh 1.2s infinite}
+  @keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+  @media (max-width:520px){h1{font-size:27px} .wrap{padding-top:32px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🛡️</div>
+    <h1>Short Polling VPN</h1>
+    <p class="sub">Android-клиент для туннеля на short polling: несколько подписок, профили, тест соединения и QR-импорт.</p>
+    <div class="cta">
+      <a id="download" class="btn btn-primary" href="https://github.com/victor-osipov-dev/short-polling-vpn/releases/latest">
+        ⬇ Скачать APK
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/victor-osipov-dev/short-polling-vpn">Исходники на GitHub</a>
+    </div>
+    <p class="meta" id="latest-meta">Последняя версия · Android 7.0+</p>
+  </header>
+
+  <section>
+    <h2>Релизы</h2>
+    <div id="releases"><div class="skeleton"></div><div class="skeleton" style="margin-top:12px"></div></div>
+  </section>
+
+  <section>
+    <h2>Как установить</h2>
+    <div class="card">
+      <ol>
+        <li>Скачай APK на телефон (кнопка выше или файл в списке релизов).</li>
+        <li>Открой файл — Android попросит разрешить установку из этого источника. Разреши и подтверди установку.</li>
+        <li>Запусти приложение и добавь подписку: ссылкой, из буфера обмена или сканированием QR-кода.</li>
+        <li>Выбери профиль, нажми «Подключить» и подожди, пока пройдёт тест соединения.</li>
+      </ol>
+      <p class="note" style="margin-top:16px">Сборка подписана debug-ключом, поэтому при обновлении поверх предыдущей версии данные приложения сохраняются, но Play Protect может показать предупреждение — это нормально для сборок вне Google Play.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Возможности</h2>
+    <div class="grid">
+      <div class="feat"><b>Несколько подписок</b><span>Новый импорт не затирает уже добавленные подписки.</span></div>
+      <div class="feat"><b>Профили</b><span>Список подключений по подпискам, тест одного профиля или сразу всех.</span></div>
+      <div class="feat"><b>QR-импорт</b><span>Сканер работает в портретном режиме и наводится на код подписки.</span></div>
+      <div class="feat"><b>Проверка соединения</b><span>Перед подключением проверяются узлы и доступность маршрута.</span></div>
+    </div>
+  </section>
+
+  <footer>
+    <p>© <span id="year"></span> Short Polling VPN · <a href="https://github.com/victor-osipov-dev/short-polling-vpn">github.com/victor-osipov-dev/short-polling-vpn</a></p>
+  </footer>
+</div>
+
+<script>
+const REPO = 'victor-osipov-dev/short-polling-vpn';
+document.getElementById('year').textContent = new Date().getFullYear();
+
+function fmtSize(bytes){
+  if(!bytes) return '';
+  const mb = bytes / 1048576;
+  return mb >= 1 ? mb.toFixed(1) + ' МБ' : Math.round(bytes / 1024) + ' КБ';
+}
+function fmtDate(iso){
+  return new Date(iso).toLocaleDateString('ru-RU', {day:'numeric', month:'long', year:'numeric'});
+}
+function esc(s){
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function load(){
+  const box = document.getElementById('releases');
+  try{
+    const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=20`, {headers:{Accept:'application/vnd.github+json'}});
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const releases = await res.json();
+    if(!releases.length){
+      box.innerHTML = `<div class="card">Релизов пока нет. <a href="https://github.com/${REPO}/releases">Открыть страницу релизов</a>.</div>`;
+      return;
+    }
+    const latest = releases.find(r => !r.draft && !r.prerelease) || releases[0];
+    const latestApk = (latest.assets || []).find(a => a.name.toLowerCase().endsWith('.apk'));
+    if(latestApk){
+      const btn = document.getElementById('download');
+      btn.href = latestApk.browser_download_url;
+      document.getElementById('latest-meta').innerHTML =
+        `Последняя версия <code>${esc(latest.tag_name)}</code> · ${fmtDate(latest.published_at)} · APK ${fmtSize(latestApk.size)}`;
+    }
+    box.innerHTML = releases.map(r => {
+      const apk = (r.assets || []).find(a => a.name.toLowerCase().endsWith('.apk'));
+      const badge = r.prerelease ? '<span class="badge pre">beta</span>' : (r === latest ? '<span class="badge">latest</span>' : '');
+      const link = apk
+        ? `<a class="apk" href="${apk.browser_download_url}">⬇ APK <small>${fmtSize(apk.size)}</small></a>`
+        : `<a class="apk" href="${r.html_url}">Открыть релиз</a>`;
+      return `<div class="release">
+        <div>
+          <p class="r-title">${esc(r.name || r.tag_name)}${badge}</p>
+          <p class="r-date">${esc(r.tag_name)} · ${fmtDate(r.published_at)}</p>
+        </div>
+        ${link}
+      </div>`;
+    }).join('');
+  } catch(e){
+    box.innerHTML = `<div class="card">Не удалось загрузить список релизов (${esc(e.message)}).
+      <a href="https://github.com/${REPO}/releases">Открыть релизы на GitHub</a>.</div>`;
+  }
+}
+load();
+</script>
+</body>
+</html>
