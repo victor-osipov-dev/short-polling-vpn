@@ -16,3 +16,5 @@ env/
 config.yaml
 *.spec
 *.exe
+profiles.json
+desktop_prefs.json
