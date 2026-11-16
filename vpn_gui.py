@@ -35,6 +35,7 @@ from socks5_server import handle_socks_client
 from desktop_client import handle_http_client, set_system_proxy_windows
 from desktop_config import DesktopConfig, default_profile_config
 from connection_test import test_profile
+import tun_mode
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -208,6 +209,12 @@ class VpnGui:
         self._test_results: dict[str, dict] = {}
         self._testing: set[str] = set()
         self._last_url_status: dict[str, dict] = {}
+        # TUN-режим: клиент elevated-помощника и признак поднятого адаптера.
+        self._tun_helper: tun_mode.TunHelperClient | None = None
+        self._tun_active = False
+        self._tun_error = ""
+        self._tun_route_busy = False
+        self._phys_adapter: dict | None = None
         # Очередь задач в главный поток: туннель, тесты, импорт и трей
         # работают в своих потоках, а tkinter трогать оттуда нельзя —
         # root.after() из чужого потока на Windows падает с
@@ -363,6 +370,12 @@ class VpnGui:
             return "127.0.0.1"
         return self.socks_host
 
+    def _mode_label(self, profile: dict) -> str:
+        if profile["mode"] != "vpn":
+            return "Proxy"
+        backend = profile.get("vpn_backend", "tun")
+        return "VPN (TUN)" if backend == "tun" else "VPN (proxy)"
+
     # ══════════════════════════════════════════════════════════════════
     #  Профили и подписки (главный экран)
     # ══════════════════════════════════════════════════════════════════
@@ -372,7 +385,7 @@ class VpnGui:
         self._reload_display_config()
         profile = self.active_profile
         if profile:
-            mode = "VPN" if profile["mode"] == "vpn" else "Proxy"
+            mode = self._mode_label(profile)
             self.active_label.configure(
                 text=f"{profile['name']}  ·  {mode}")
         else:
@@ -486,7 +499,7 @@ class VpnGui:
         tk.Label(name_row, text=profile["name"], font=self.FONT_B, bg=card["bg"],
                  fg=FG_TEXT).pack(side=tk.LEFT)
 
-        mode = "VPN" if profile["mode"] == "vpn" else "Proxy"
+        mode = self._mode_label(profile)
         tk.Label(left, text=mode, font=self.FONT_S, bg=card["bg"],
                  fg=FG_LABEL).pack(anchor=tk.W, padx=(2 if not active else 16, 0))
 
@@ -733,7 +746,7 @@ class VpnGui:
             row = tk.Frame(card, bg=card["bg"])
             row.pack(fill=tk.X, padx=10, pady=6)
             tk.Label(row, text=p["name"], font=self.FONT_B, bg=card["bg"], fg=FG_TEXT).pack(side=tk.LEFT)
-            tk.Label(row, text=("VPN" if p["mode"] == "vpn" else "Proxy"), font=self.FONT_S,
+            tk.Label(row, text=self._mode_label(p), font=self.FONT_S,
                      bg=card["bg"], fg=FG_LABEL).pack(side=tk.LEFT, padx=8)
             tk.Button(row, text="✕", font=self.FONT_S, bg=card["bg"], fg=FG_LABEL, relief=tk.FLAT,
                       bd=0, cursor="hand2", activebackground=card["bg"], activeforeground=FG_RED,
@@ -871,12 +884,37 @@ class VpnGui:
               lambda: self._set_mode("proxy"), bg=BG_MAIN).pack(side=tk.LEFT)
         _chip(mode_row, "VPN", profile and profile["mode"] == "vpn",
               lambda: self._set_mode("vpn"), bg=BG_MAIN).pack(side=tk.LEFT, padx=6)
+
         if profile and profile["mode"] == "vpn":
-            tk.Label(inner,
-                     text=tr("VPN mode uses system-wide capture on Windows via the system proxy setting.",
-                             "VPN-режим на Windows использует системный прокси (перехват всего трафика приложениями)."),
-                     font=self.FONT_S, bg=BG_MAIN, fg=FG_LABEL, wraplength=560,
-                     justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(4, 0))
+            backend = profile.get("vpn_backend", "tun")
+            tun_ok = tun_mode.tun_available()
+            tk.Label(inner, text=tr("Implementation", "Реализация"), font=self.FONT_B,
+                     bg=BG_MAIN, fg=FG_LABEL).pack(anchor=tk.W, padx=14, pady=(10, 4))
+            brow = tk.Frame(inner, bg=BG_MAIN)
+            brow.pack(fill=tk.X, padx=14)
+            tun_chip = _chip(brow, tr("TUN (all traffic)", "TUN (весь трафик)"),
+                             backend == "tun", lambda: self._set_vpn_backend("tun"),
+                             bg=BG_MAIN)
+            tun_chip.pack(side=tk.LEFT)
+            _chip(brow, tr("System proxy", "Системный прокси"), backend == "system",
+                  lambda: self._set_vpn_backend("system"), bg=BG_MAIN).pack(side=tk.LEFT, padx=6)
+            if not tun_ok:
+                tun_chip.configure(state="disabled", fg=FG_LABEL)
+
+            if backend == "tun":
+                note = (tr("TUN mode creates a Wintun adapter and routes all traffic. "
+                           "Windows asks for administrator rights once per app launch.",
+                           "TUN-режим создаёт Wintun-адаптер и заворачивает весь трафик. "
+                           "Windows попросит права администратора один раз за запуск.")
+                        if tun_ok else
+                        tr("TUN backend is unavailable: bin/win/tun2proxy-bin.exe or wintun.dll not found.",
+                           "TUN-бэкенд недоступен: не найден bin/win/tun2proxy-bin.exe или wintun.dll."))
+            else:
+                note = tr("System proxy mode configures the Windows proxy; apps that ignore it bypass the VPN.",
+                          "Режим системного прокси настраивает прокси Windows; приложения, "
+                          "игнорирующие его, идут мимо VPN.")
+            tk.Label(inner, text=note, font=self.FONT_S, bg=BG_MAIN, fg=FG_LABEL,
+                     wraplength=560, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(4, 0))
 
         tk.Frame(inner, bg=BORDER, height=1).pack(fill=tk.X, padx=14, pady=10)
 
@@ -1018,6 +1056,8 @@ class VpnGui:
                        selectcolor=BG_INPUT,
                        command=lambda: self._set_client_value("verify_tls", tls_var.get())).pack(side=tk.LEFT, padx=8)
 
+        self._build_tun_fields(parent, client)
+
         # Advanced JSON
         tk.Frame(parent, bg=BORDER, height=1).pack(fill=tk.X, padx=14, pady=10)
         tk.Label(parent, text=tr("Advanced config (JSON)", "Продвинутый конфиг (JSON)"),
@@ -1034,6 +1074,105 @@ class VpnGui:
                   bg=BTN_ACCENT, fg="white", relief=tk.FLAT, bd=0, padx=12, pady=5,
                   cursor="hand2", activebackground=BTN_ACCENT_HOVER, activeforeground="white",
                   command=self._save_raw_config).pack(anchor=tk.W, padx=14, pady=(4, 14))
+
+    def _build_tun_fields(self, parent, client: dict):
+        """TUN-параметры, DNS-relay и idle-timeout."""
+        tk.Frame(parent, bg=BORDER, height=1).pack(fill=tk.X, padx=14, pady=10)
+        tk.Label(parent, text=tr("TUN / idle", "TUN / простой"), font=self.FONT_B, bg=BG_MAIN,
+                 fg=FG_LABEL).pack(anchor=tk.W, padx=14, pady=(0, 4))
+
+        tun = client.get("tun") or {}
+        tun_exe = tun_mode.tun2proxy_path()
+        tk.Label(parent,
+                 text=(tr("tun2proxy: ", "tun2proxy: ") + (str(tun_exe) if tun_exe else
+                       tr("not found (bin/win)", "не найден (bin/win)"))),
+                 font=("Consolas", 8), bg=BG_MAIN, fg=FG_LABEL, wraplength=560,
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=14)
+
+        def tun_field(label, value, key, cast=lambda v: v):
+            row = tk.Frame(parent, bg=BG_MAIN)
+            row.pack(fill=tk.X, padx=14, pady=2)
+            tk.Label(row, text=label, font=self.FONT_S, bg=BG_MAIN, fg=FG_LABEL,
+                     width=20, anchor=tk.W).pack(side=tk.LEFT)
+            var = tk.StringVar(value=str(value))
+
+            def save(*_):
+                try:
+                    self._set_tun_value(key, cast(var.get()))
+                except Exception:
+                    pass
+
+            entry = tk.Entry(row, textvariable=var, font=("Consolas", 9), bg=BG_INPUT,
+                             fg=FG_TEXT, insertbackground=FG_TEXT, relief=tk.FLAT)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+            entry.bind("<FocusOut>", save)
+            entry.bind("<Return>", save)
+
+        tun_field(tr("TUN MTU", "MTU TUN"), tun.get("mtu", 1500), "mtu", int)
+        tun_field(tr("Adapter name", "Имя адаптера"), tun.get("name", "vpnclient"), "name", str)
+        tun_field(tr("Helper port", "Порт помощника"), tun.get("helper_port", 41417),
+                  "helper_port", int)
+        tun_field(tr("Bypass IPs (comma)", "Bypass IP (через запятую)"),
+                  ",".join(tun.get("bypass_ips") or []), "bypass_ips", str)
+
+        hij_row = tk.Frame(parent, bg=BG_MAIN)
+        hij_row.pack(fill=tk.X, padx=14, pady=2)
+        hij_var = tk.BooleanVar(value=bool(tun.get("dns_hijack", True)))
+        tk.Checkbutton(
+            hij_row, variable=hij_var, bg=BG_MAIN, activebackground=BG_MAIN,
+            selectcolor=BG_INPUT,
+            command=lambda: self._set_tun_value("dns_hijack", hij_var.get()),
+            text=tr("Route system DNS through the tunnel (no leaks)",
+                    "Завернуть системный DNS в туннель (без утечек)"),
+            font=self.FONT_S, fg=FG_TEXT, anchor=tk.W).pack(side=tk.LEFT)
+
+        dns_row = tk.Frame(parent, bg=BG_MAIN)
+        dns_row.pack(fill=tk.X, padx=14, pady=4)
+        tk.Label(dns_row, text=tr("TUN DNS:", "DNS в TUN:"), font=self.FONT, bg=BG_MAIN,
+                 fg=FG_TEXT).pack(side=tk.LEFT)
+        for mode in ("virtual", "over-tcp", "direct"):
+            _chip(dns_row, mode, (tun.get("dns_mode") or "virtual") == mode,
+                  lambda m=mode: self._set_tun_value("dns_mode", m), bg=BG_MAIN).pack(side=tk.LEFT, padx=4)
+
+        idle = client.get("idle_timeout") or {}
+        idle_row = tk.Frame(parent, bg=BG_MAIN)
+        idle_row.pack(fill=tk.X, padx=14, pady=4)
+        tk.Label(idle_row, text=tr("Idle timeout:", "Таймаут простоя:"), font=self.FONT,
+                 bg=BG_MAIN, fg=FG_TEXT).pack(side=tk.LEFT)
+        idle_var = tk.BooleanVar(value=bool(idle.get("enabled")))
+        tk.Checkbutton(idle_row, variable=idle_var, bg=BG_MAIN, activebackground=BG_MAIN,
+                       selectcolor=BG_INPUT,
+                       command=lambda: self._set_client_value(
+                           "idle_timeout", {"enabled": idle_var.get(),
+                                            "seconds": int(idle.get("seconds", 300))})
+                       ).pack(side=tk.LEFT, padx=6)
+        idle_secs = tk.StringVar(value=str(idle.get("seconds", 300)))
+        idle_entry = tk.Entry(idle_row, textvariable=idle_secs, width=7, font=("Consolas", 9),
+                              bg=BG_INPUT, fg=FG_TEXT, insertbackground=FG_TEXT, relief=tk.FLAT)
+        idle_entry.pack(side=tk.LEFT, ipady=3)
+
+        def save_idle(*_):
+            try:
+                self._set_client_value("idle_timeout", {
+                    "enabled": idle_var.get(), "seconds": int(idle_secs.get())})
+            except Exception:
+                pass
+        idle_entry.bind("<FocusOut>", save_idle)
+        idle_entry.bind("<Return>", save_idle)
+
+        dns_relay = client.get("dns_relay") or {}
+        dr_row = tk.Frame(parent, bg=BG_MAIN)
+        dr_row.pack(fill=tk.X, padx=14, pady=(4, 8))
+        tk.Label(dr_row, text=tr("DNS relay (5353):", "DNS-релей (5353):"), font=self.FONT,
+                 bg=BG_MAIN, fg=FG_TEXT).pack(side=tk.LEFT)
+        dr_var = tk.BooleanVar(value=bool(dns_relay.get("enabled")))
+        tk.Checkbutton(dr_row, variable=dr_var, bg=BG_MAIN, activebackground=BG_MAIN,
+                       selectcolor=BG_INPUT,
+                       command=lambda: self._set_client_value("dns_relay", {
+                           "enabled": dr_var.get(),
+                           "bind_host": dns_relay.get("bind_host", "127.0.0.1"),
+                           "bind_port": int(dns_relay.get("bind_port", 5353))})
+                       ).pack(side=tk.LEFT, padx=6)
 
     # ── Настройки профиля ──
 
@@ -1060,6 +1199,15 @@ class VpnGui:
         self._build_connection_tab()
         self._refresh_profiles()
 
+    def _set_vpn_backend(self, backend: str):
+        profile = self.cfg.get_active_profile()
+        if not profile:
+            return
+        profile["vpn_backend"] = "system" if backend == "system" else "tun"
+        self.cfg.update_profile(profile)
+        self._build_connection_tab()
+        self._refresh_profiles()
+
     def _set_client_value(self, key: str, value):
         def fn(cfg):
             client = cfg["client"]
@@ -1069,6 +1217,17 @@ class VpnGui:
                 client["socks5"]["http_port"] = int(value)
             else:
                 client[key] = value
+            return cfg
+        self._mutate_profile(fn)
+
+    def _set_tun_value(self, key: str, value):
+        def fn(cfg):
+            tun = cfg["client"].setdefault("tun", {})
+            if key == "bypass_ips":
+                items = [s.strip() for s in str(value).split(",") if s.strip()]
+                tun["bypass_ips"] = items
+            else:
+                tun[key] = value
             return cfg
         self._mutate_profile(fn)
 
@@ -1364,10 +1523,19 @@ class VpnGui:
         self._schedule_url_status()
         self._start_config_watcher()
 
+    def _vpn_backend(self) -> str:
+        if not self.active_profile or self.active_profile["mode"] != "vpn":
+            return ""
+        return self.active_profile.get("vpn_backend", "tun")
+
+    def _use_tun(self) -> bool:
+        return self._vpn_backend() == "tun"
+
     def _schedule_proxy_guard(self):
         if not self.running:
             return
-        if (self.active_profile and self.active_profile["mode"] == "vpn"
+        # В TUN-режиме системный прокси не нужен (и вреден: двойной обход).
+        if (self.active_profile and self._vpn_backend() == "system"
                 and sys.platform == "win32"
                 and self.socks_host in ("0.0.0.0", "127.0.0.1", "localhost")):
             try:
@@ -1444,12 +1612,114 @@ class VpnGui:
 
     def _check_started(self):
         if self.running and self._tunnel:
-            proxy_status = self._verify_system_proxy()
-            self.info_label.configure(
-                text=f"SK5:{self.socks_port}  HTTP:{self.http_port}  PRX:{proxy_status}")
-            self.proxy_indicator.configure(
-                text=f"PROXY: {proxy_status}",
-                fg=FG_GREEN if proxy_status == "SET" else FG_RED)
+            if self._use_tun():
+                if self._tun_active and self._tun_route_busy:
+                    label, color = "TUN: ROUTE BUSY", FG_AMBER
+                elif self._tun_active:
+                    label, color = "TUN: UP", FG_GREEN
+                elif self._tun_error:
+                    label, color = "TUN: ERROR", FG_RED
+                else:
+                    label, color = "TUN: starting…", FG_AMBER
+                self.info_label.configure(
+                    text=f"SK5:{self.socks_port}  HTTP:{self.http_port}  {label}")
+                self.proxy_indicator.configure(text=label, fg=color)
+            else:
+                proxy_status = self._verify_system_proxy()
+                self.info_label.configure(
+                    text=f"SK5:{self.socks_port}  HTTP:{self.http_port}  PRX:{proxy_status}")
+                self.proxy_indicator.configure(
+                    text=f"PROXY: {proxy_status}",
+                    fg=FG_GREEN if proxy_status == "SET" else FG_RED)
+        if self.running:
+            self.root.after(2000, self._check_started)
+
+    # ── TUN-режим ──
+
+    def _start_tun(self):
+        """Поднимает Wintun через elevated-помощник (в отдельном потоке)."""
+        threading.Thread(target=self._start_tun_worker, daemon=True).start()
+
+    def _start_tun_worker(self):
+        profile = self.active_profile or {}
+        client = (profile.get("config") or {}).get("client") or {}
+        tun_cfg = client.get("tun") or {}
+        port = int(tun_cfg.get("helper_port", tun_mode.DEFAULT_HELPER_PORT))
+        token = self.cfg.get_pref("tun_helper_token", "") or os.urandom(16).hex()
+        self.cfg.set_pref("tun_helper_token", token)
+
+        bypass = list(tun_cfg.get("bypass_ips") or [])
+        # IP узлов: берём уже разрезолвленную карту туннеля и литеральные IP.
+        # Повторный getaddrinfo здесь опасен — DNS мог быть уже переключён
+        # на TUN, и мы получили бы fake-IP.
+        resolved = tuple((self._tunnel._host_ip or {}).values()) if self._tunnel else ()
+        for ip in list(resolved) + tun_mode.literal_ips_from_urls(self.server_urls):
+            if ip and ip not in bypass:
+                bypass.append(ip)
+
+        helper = tun_mode.TunHelperClient(on_log=lambda m: self._log(m, "INFO"))
+        self._tun_helper = helper
+        try:
+            if not helper.connect(port, token):
+                self._tun_error = "helper"
+                self._log(tr("TUN: elevated helper unavailable (UAC declined?)",
+                             "TUN: повышенный помощник недоступен (UAC отклонён?)"), "ERROR")
+                return
+            resp = helper.start_tun(
+                "127.0.0.1", self.socks_port,
+                mtu=int(tun_cfg.get("mtu", 1500)),
+                dns_mode=str(tun_cfg.get("dns_mode", tun_mode.DEFAULT_DNS_MODE)),
+                bypass_ips=bypass,
+                verbosity=str(tun_cfg.get("verbosity", "info")),
+                tun_name=str(tun_cfg.get("name") or ""),
+                dns_hijack=bool(tun_cfg.get("dns_hijack", True)),
+                physical_alias=str((self._phys_adapter or {}).get("alias") or ""),
+                physical_ip=str((self._phys_adapter or {}).get("ip") or ""),
+            )
+            if not resp.get("ok"):
+                self._tun_error = str(resp.get("error") or "start failed")
+                self._log(f"TUN start failed: {self._tun_error}", "ERROR")
+                return
+            self._tun_active = True
+            self._tun_error = ""
+            self._log(tr("TUN adapter is up: all traffic goes through the VPN.",
+                         "TUN-адаптер поднят: весь трафик идёт через VPN."), "INFO")
+            threading.Thread(target=self._verify_tun_route,
+                             args=(str(tun_cfg.get("name") or "vpnclient"),),
+                             daemon=True).start()
+        except Exception as exc:
+            self._tun_error = f"{type(exc).__name__}: {exc}"
+            self._log(f"TUN error: {self._tun_error}", "ERROR")
+
+    def _verify_tun_route(self, tun_name: str) -> None:
+        """Предупреждает, если default-route захвачен другим VPN."""
+        time.sleep(4.0)
+        if not self._tun_active:
+            return
+        alias = tun_mode.default_route_alias()
+        if alias and tun_name and alias.lower() != tun_name.lower():
+            self._tun_route_busy = True
+            self._log(tr(f"TUN: default route is on '{alias}' — another VPN "
+                         "captures traffic; disable it for full tunneling.",
+                         f"TUN: default-route на '{alias}' — трафик перехватывает "
+                         "другой VPN; отключите его, чтобы весь трафик шёл сюда."),
+                      "WARNING")
+        else:
+            self._tun_route_busy = False
+
+    def _stop_tun(self):
+        helper = self._tun_helper
+        self._tun_helper = None
+        self._tun_active = False
+        self._tun_error = ""
+        self._tun_route_busy = False
+        if helper is None:
+            return
+        try:
+            helper.stop_tun()
+        except Exception as exc:
+            self._log(f"TUN stop error: {exc}", "WARNING")
+        # Помощник переиспользуется между подключениями — не выходим.
 
     def _verify_system_proxy(self) -> str:
         if sys.platform != "win32":
@@ -1477,6 +1747,7 @@ class VpnGui:
         self.info_label.configure(text=tr("Disconnected.", "Отключено."))
         self._log("VPN stopping...", "INFO")
 
+        self._stop_tun()
         set_system_proxy_windows("127.0.0.1", self.socks_port, self.http_port, False)
         self._log("System proxy cleared.", "INFO")
         self._last_url_status = {}
@@ -1497,8 +1768,30 @@ class VpnGui:
         http_server = None
         try:
             cfg = self.cfg.engine_config(self.active_profile)
+            use_tun = self._use_tun()
+            if use_tun:
+                # Привязываем poll-запросы к физическому адаптеру: иначе
+                # после --setup они уйдут в собственный TUN (петля).
+                cfg.setdefault("client", {})["tun_resolve"] = True
+                adapter = tun_mode.detect_physical_adapter()
+                self._phys_adapter = adapter
+                phys = (adapter or {}).get("ip")
+                if phys:
+                    cfg.setdefault("client", {})["local_address"] = phys
+                    self._log(f"TUN: poll-запросы привязаны к {phys}", "INFO")
+                else:
+                    self._log("TUN: не удалось определить физический IPv4 — "
+                              "работаем только на --bypass", "WARNING")
             self._tunnel = ClientTunnel(cfg)
             self._tunnel.set_log_callback(lambda m: self._log(m, "INFO"))
+            if use_tun:
+                # Резолвим имена узлов ДО поднятия TUN: сейчас ещё работает
+                # обычный DNS. Иначе виртуальный DNS tun2proxy вернёт fake-IP
+                # и наши же poll-запросы уйдут в собственный туннель.
+                resolved = self._tunnel.resolve_host_ips()
+                if not resolved:
+                    self._log("TUN: не удалось заранее разрешить имена узлов; "
+                              "poll-запросы могут зациклиться", "WARNING")
             self._tunnel._start_dns_relay()
 
             poll_task = loop.create_task(self._tunnel.poll_loop())
@@ -1508,14 +1801,18 @@ class VpnGui:
                 self._log("Failed to bind proxy servers", "ERROR")
                 return
 
-            # Системный прокси ставим только в VPN-режиме профиля: в режиме
-            # Proxy пользователь сам настраивает приложения на SOCKS5.
-            use_system_proxy = (sys.platform == "win32"
-                                and self.active_profile
-                                and self.active_profile["mode"] == "vpn"
-                                and self.socks_host in ("0.0.0.0", "127.0.0.1", "localhost"))
-            if use_system_proxy:
-                set_system_proxy_windows("127.0.0.1", self.socks_port, self.http_port, True)
+            if use_tun:
+                # SOCKS5 уже слушает: поднимаем Wintun и заворачиваем трафик.
+                self._start_tun()
+            else:
+                # Системный прокси ставим только в VPN-режиме: в режиме Proxy
+                # пользователь сам настраивает приложения на SOCKS5.
+                use_system_proxy = (sys.platform == "win32"
+                                    and self.active_profile
+                                    and self._vpn_backend() == "system"
+                                    and self.socks_host in ("0.0.0.0", "127.0.0.1", "localhost"))
+                if use_system_proxy:
+                    set_system_proxy_windows("127.0.0.1", self.socks_port, self.http_port, True)
 
             loop.run_forever()
         except Exception as e:
@@ -1647,6 +1944,14 @@ class VpnGui:
                 pass
         if self.running:
             self._stop()
+        # Гасим elevated-помощник, если он ещё жив.
+        helper = self._tun_helper
+        self._tun_helper = None
+        if helper is not None:
+            try:
+                helper.quit()
+            except Exception:
+                pass
         self.root.destroy()
 
 
@@ -1655,6 +1960,12 @@ class VpnGui:
 # ══════════════════════════════════════════════════════════════════════
 
 def main():
+    # Frozen-сборка использует этот же exe как elevated-помощник TUN-режима.
+    if "--tun-helper" in sys.argv:
+        from vpn_helper import main as helper_main
+        sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != "--tun-helper"]
+        sys.exit(helper_main())
+
     parser = argparse.ArgumentParser(description="Desktop VPN Client — GUI")
     parser.add_argument("--config", default="config.yaml", help="path to config.yaml (migration source)")
     parser.add_argument("--profiles", default="", help="path to profiles.json (default: next to config)")

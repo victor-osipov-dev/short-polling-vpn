@@ -53,6 +53,25 @@ def default_client_config() -> dict:
         "disabled_urls": [],
         "idle_timeout": {"enabled": False, "seconds": 300},
         "dns_relay": {"enabled": False, "bind_host": "127.0.0.1", "bind_port": 5353},
+        # Привязка poll-запросов к IP физического адаптера (TUN-режим).
+        "local_address": "",
+        # Настоящий VPN через Wintun (tun2proxy). Используется, когда
+        # профиль в режиме "vpn" и backend == "tun".
+        "tun": {
+            "mtu": 1500,
+            # Имя Wintun-адаптера: удобно искать в ipconfig и удалять после
+            # аварийного завершения.
+            "name": "vpnclient",
+            # virtual: tun2proxy сам отвечает на DNS и передаёт имена дальше —
+            # наш SOCKS5 умеет только TCP CONNECT, поэтому UDP DNS не годится.
+            "dns_mode": "virtual",
+            "bypass_ips": [],
+            "helper_port": 41417,
+            "verbosity": "info",
+            # DNS физического адаптера переключается на шлюз TUN, иначе
+            # Windows продолжает спрашивать DNS провайдера параллельно.
+            "dns_hijack": True,
+        },
     }
 
 
@@ -164,6 +183,9 @@ class DesktopConfig:
             "id": str(raw.get("id") or uuid.uuid4()),
             "name": str(raw.get("name") or "Profile"),
             "mode": "vpn" if str(raw.get("mode", "proxy")) == "vpn" else "proxy",
+            # Как реализуется режим "vpn": "tun" (Wintun, весь трафик) или
+            # "system" (системный прокси Windows). "proxy" игнорирует поле.
+            "vpn_backend": "system" if str(raw.get("vpn_backend", "tun")) == "system" else "tun",
             "config": _deep_merge(default_profile_config(), raw.get("config") or {}),
         }
         return profile

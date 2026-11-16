@@ -103,6 +103,16 @@ class ClientTunnel:
         self.host_header = client_cfg.get("host_header") or None
         verify_tls = client_cfg.get("verify_tls", True)
         trust_env = client_cfg.get("trust_env_proxy", False)
+        # Привязка исходящих poll-запросов к IP физического адаптера. Нужна
+        # в TUN-режиме: там default-route уходит в TUN, и без привязки наши
+        # же запросы к серверу заворачивались бы в собственный туннель.
+        self.local_address = str(client_cfg.get("local_address") or "").strip() or None
+        # TUN-режим: имена узлов превращаем в IP заранее (до поднятия TUN),
+        # иначе getaddrinfo пойдёт через виртуальный DNS tun2proxy и вернёт
+        # fake-IP, который снова уедет в TUN. SNI/Host при этом остаются
+        # настоящими, поэтому TLS и проверка Host не ломаются.
+        self.tun_resolve = bool(client_cfg.get("tun_resolve", False))
+        self._host_ip: dict[str, str] = {}
 
         # Per-user режим: пользователь и устройство из подписки. Ключи в этом
         # режиме выводятся из секрета пользователя, поэтому общий PSK может
@@ -143,6 +153,9 @@ class ClientTunnel:
         # задерживать poll-цикл (read timeout длинный для long-poll).
         self.http = httpx.AsyncClient(
             http2=True, verify=verify_tls, trust_env=trust_env,
+            transport=httpx.AsyncHTTPTransport(
+                verify=verify_tls, trust_env=trust_env,
+                local_address=self.local_address, retries=0),
             timeout=httpx.Timeout(15.0, connect=4.0))
         self._stop = False
 
@@ -381,6 +394,35 @@ class ClientTunnel:
         self.server_urls = [u for u in self.all_server_urls if u not in self.disabled_urls]
         self._no_url_warned = False
 
+    def resolve_host_ips(self) -> dict[str, str]:
+        """Заранее резолвит хосты узлов в IPv4 (для TUN-режима).
+
+        Вызывать ДО поднятия TUN: пока действует обычный маршрут, имена
+        разрешаются физическим DNS. Результат уходит в _host_ip, и poll-
+        запросы идут на IP с настоящими SNI/Host.
+        """
+        import socket as _socket
+        from urllib.parse import urlparse as _urlparse
+        mapping: dict[str, str] = {}
+        for base in self.all_server_urls:
+            try:
+                host = _urlparse(base).hostname
+            except Exception:
+                host = None
+            if not host:
+                continue
+            try:
+                infos = _socket.getaddrinfo(host, None, _socket.AF_INET, _socket.SOCK_STREAM)
+            except Exception as exc:
+                logger.debug("resolve %s failed: %s", host, exc)
+                continue
+            if infos:
+                mapping[base] = infos[0][4][0]
+        self._host_ip = mapping
+        if mapping:
+            logger.info("tun_resolve: resolved %d node URL(s) to IPs", len(mapping))
+        return mapping
+
     # ── Polling loop ──
 
     async def _subscription_refresh_loop(self):
@@ -568,14 +610,32 @@ class ClientTunnel:
         if self.poll_data_in == "header":
             headers["X-Data"] = b64u_encode(blob)
 
+        # В TUN-режиме заменяем host в URL на заранее разрезолвленный IP,
+        # сохраняя SNI и Host настоящими (TLS-сертификат и виртуальный хост
+        # сервера проверяются по имени).
+        extensions = None
+        url = url_base + random_cdn_path(self.poll_path)
+        if self.tun_resolve and url_base in self._host_ip:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url_base)
+            sni = parsed.hostname or ""
+            ip = self._host_ip[url_base]
+            netloc = ip + (f":{parsed.port}" if parsed.port else "")
+            new_base = urlunparse((parsed.scheme, netloc, "", "", "", ""))
+            url = new_base + random_cdn_path(self.poll_path)
+            if sni:
+                extensions = {"sni_hostname": sni}
+                headers.setdefault("Host", sni if not parsed.port else f"{sni}:{parsed.port}")
+
         kwargs = {"params": params, "headers": headers}
+        if extensions:
+            kwargs["extensions"] = extensions
         if self.poll_data_in == "body":
             kwargs["content"] = b64u_encode(blob)
         if timeout is not None:
             kwargs["timeout"] = timeout
 
         self._poll_count += 1
-        url = url_base + random_cdn_path(self.poll_path)
         try:
             async with self.http.stream(self.poll_method, url, **kwargs) as resp:
                 if "Date" in resp.headers:
