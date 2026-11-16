@@ -736,7 +736,7 @@ GET /rules/latest             -> latest version metadata + URL
 - `split_routing.py` — GeoIP/домены, классификация, выбор маршрута, direct для private.
 - `admin/rules.py` — обновление публичных RU GeoIP/доменов.
 - `server.py` — публичные `/sub/<token>`, `/rules/<name>`, `/replicate/ops`.
-- Android UI: в Settings → Connection поле **Subscription URL** и кнопка «Загрузить» (user/узлы сохраняются; маршруты и split-routing применяются при подключении).
+- Android UI: в Settings → Connection поле **Subscription URL** и кнопка «Загрузить» (user/узлы сохраняются; маршруты и split-routing применяются при подключении). Импорт подписки также доступен с главного экрана: вставить URL, взять из буфера или отсканировать QR.
 - Desktop UI (`vpn_gui.py`): импорт подписок (URL/файл/буфер), именованные профили в `profiles.json` (модель совместима с Android), выбор режима Proxy/VPN, маршруты RU/non-RU/private, тесты подключения (задержка/exit IP/цепочка) и живой статус URL — см. `docs/desktop-client.md`.
 - Панель: страница **Узлы** (subscription.nodes, пиры, файлы правил, node_id/public_key), страница **Маршруты** (конструктор цепочек из 1–3 hop-ов) и **Профили** (route_ru/route_non_ru/route_private выбираются из маршрутов).
 - Тесты: 15 (хранилище, панель, репликация, auth, split-routing, subscription).

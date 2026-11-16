@@ -107,6 +107,7 @@ class DesktopConfig:
 
     def __init__(self, base_dir: str | os.PathLike = "."):
         self.base_dir = Path(base_dir).resolve()
+        self.base_dir.mkdir(parents=True, exist_ok=True)
         self.profiles_path = self.base_dir / PROFILES_FILE
         self.prefs_path = self.base_dir / PREFS_FILE
         self._lock = threading.RLock()

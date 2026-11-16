@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import sys
 import threading
 import time
@@ -120,10 +121,10 @@ class TkLogHandler(logging.Handler):
 class ConfigFileHandler(FileSystemEventHandler):
     """Срабатывает при изменении config.yaml — планирует callback в main thread."""
 
-    def __init__(self, config_path: str, root, callback):
+    def __init__(self, config_path: str, post, callback):
         super().__init__()
         self._config_path = os.path.abspath(config_path)
-        self._root = root
+        self._post = post
         self._callback = callback
         self._last_event = 0
 
@@ -132,7 +133,7 @@ class ConfigFileHandler(FileSystemEventHandler):
             now = time.time()
             if now - self._last_event > 1.0:
                 self._last_event = now
-                self._root.after(0, self._callback)
+                self._post(self._callback)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -207,6 +208,11 @@ class VpnGui:
         self._test_results: dict[str, dict] = {}
         self._testing: set[str] = set()
         self._last_url_status: dict[str, dict] = {}
+        # Очередь задач в главный поток: туннель, тесты, импорт и трей
+        # работают в своих потоках, а tkinter трогать оттуда нельзя —
+        # root.after() из чужого потока на Windows падает с
+        # «main thread is not in main loop».
+        self._main_queue: queue.Queue = queue.Queue()
 
         # Язык
         L.ru = (self.cfg.get_pref("language", "ru") == "ru")
@@ -231,6 +237,8 @@ class VpnGui:
         self._start_config_watcher()
         self._create_tray_icon()
         self._refresh_profiles()
+        # Разбор очереди задач в главный поток (логи, тесты, импорт, трей).
+        self._pump_main_queue()
 
     # ── Загрузка активного профиля ──
 
@@ -554,7 +562,7 @@ class VpnGui:
                 result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             self._test_results[p["id"]] = result
             self._testing.discard(p["id"])
-            self.root.after(0, self._refresh_profiles)
+            self._post(self._refresh_profiles)
 
     # ── Импорт подписки ──
 
@@ -627,13 +635,10 @@ class VpnGui:
                 source_url = raw
             profile = self.cfg.import_subscription(sub, source_url, select=select)
             if profile:
-                self.root.after(0, lambda: (
-                    self._log(tr(f"OK: {profile['name']}", f"OK: {profile['name']}"), "INFO"),
-                    self._refresh_profiles(),
-                ))
+                self._post(self._log, f"OK: {profile['name']}", "INFO")
+                self._post(self._refresh_profiles)
         except Exception as exc:
-            self.root.after(0, lambda e=exc: self._log(
-                tr(f"Subscription error: {e}", f"Ошибка подписки: {e}"), "ERROR"))
+            self._post(self._log, f"Subscription error: {exc}", "ERROR")
 
     # ══════════════════════════════════════════════════════════════════
     #  Настройки (отдельное окно)
@@ -1305,7 +1310,7 @@ class VpnGui:
         return img
 
     def _tray_show(self, icon=None, item=None):
-        self.root.after(0, self._show_window)
+        self._post(self._show_window)
 
     def _show_window(self):
         self.root.deiconify()
@@ -1313,7 +1318,7 @@ class VpnGui:
         self.root.focus_force()
 
     def _tray_quit(self, icon=None, item=None):
-        self.root.after(0, self._quit_app)
+        self._post(self._quit_app)
 
     def _on_hide(self):
         self.root.withdraw()
@@ -1398,7 +1403,7 @@ class VpnGui:
         self._stop_config_watcher()
         if not os.path.exists(self.config_path):
             return
-        handler = ConfigFileHandler(self.config_path, self.root, self._on_config_changed)
+        handler = ConfigFileHandler(self.config_path, self._post, self._on_config_changed)
         self._observer = Observer()
         self._observer.schedule(handler, path=os.path.dirname(os.path.abspath(self.config_path)),
                                 recursive=False)
@@ -1569,15 +1574,32 @@ class VpnGui:
     #  Логи
     # ══════════════════════════════════════════════════════════════════
 
+    def _post(self, fn, *args):
+        """Планирует вызов в главном потоке (безопасно из любого потока)."""
+        self._main_queue.put((fn, args))
+
+    def _pump_main_queue(self):
+        """Разбирает очередь задач главного потока. Ставится в run()."""
+        while True:
+            try:
+                fn, args = self._main_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args)
+            except Exception as exc:
+                logging.getLogger("vpn-gui").warning("main-queue task failed: %s", exc)
+        self.root.after(120, self._pump_main_queue)
+
     def _log(self, msg: str, level: str = "INFO"):
         # Туннель живёт в своём потоке и зовёт лог-колбэк оттуда: tkinter
         # нельзя трогать из чужого потока, поэтому перепланируем в main.
         if threading.current_thread() is not threading.main_thread():
-            try:
-                self.root.after(0, lambda: self._log(msg, level))
-            except Exception:
-                pass
+            self._post(self._append_log, msg, level)
             return
+        self._append_log(msg, level)
+
+    def _append_log(self, msg: str, level: str = "INFO"):
         ts = time.strftime("%H:%M:%S")
         line = f"[{ts}] [{level}] {msg}"
         for widget in (self.log_text, getattr(self, "settings_log", None)):

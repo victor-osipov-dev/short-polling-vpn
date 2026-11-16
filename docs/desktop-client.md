@@ -7,21 +7,29 @@ Desktop-клиент (`vpn_gui.py`) повторяет возможности An
 
 ## Запуск
 
+Подготовка окружения (один раз):
+
 ```bash
-pip install -r requirements.txt
-python vpn_gui.py --config config.yaml
+uv venv .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt   # Windows
+# или: python -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
-- `--config` — путь к `config.yaml`. Если профилей ещё нет, из него
-  создаётся один профиль (`DesktopConfig.seed_from_yaml`) — это разовая
-  миграция со старого формата.
-- `--profiles` — путь к `profiles.json` (по умолчанию рядом с конфигом).
+Дальше:
 
-Настройки рабочего каталога:
+- `start_vpn.bat` — графический клиент (окно + трей), берёт `.venv`, если он есть.
+- `start_client.bat` — консольный клиент (`main.py`, без GUI), нужен `config.yaml` с `mode: client`.
+- либо вручную: `.venv\Scripts\python.exe vpn_gui.py --config config.yaml`.
+
+`config.yaml` не обязателен: если `profiles.json` ещё нет, профиль создаётся
+из `config.yaml` (`DesktopConfig.seed_from_yaml`); без него профилей будет
+ноль — добавьте подписку в UI. Настройки рабочего каталога:
 
 - `profiles.json` — профили и подписки (модель совпадает с Android
   `ProxyConfig`/`VpnProfile`, поэтому подписки переносимы между устройствами);
 - `desktop_prefs.json` — активный профиль и язык интерфейса.
+
+Оба файла в `.gitignore`: они содержат `device_id` и данные подписок.
 
 ## Профили и подписки
 
