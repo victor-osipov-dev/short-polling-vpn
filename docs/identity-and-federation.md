@@ -737,6 +737,7 @@ GET /rules/latest             -> latest version metadata + URL
 - `admin/rules.py` — обновление публичных RU GeoIP/доменов.
 - `server.py` — публичные `/sub/<token>`, `/rules/<name>`, `/replicate/ops`.
 - Android UI: в Settings → Connection поле **Subscription URL** и кнопка «Загрузить» (user/узлы сохраняются; маршруты и split-routing применяются при подключении).
+- Desktop UI (`vpn_gui.py`): импорт подписок (URL/файл/буфер), именованные профили в `profiles.json` (модель совместима с Android), выбор режима Proxy/VPN, маршруты RU/non-RU/private, тесты подключения (задержка/exit IP/цепочка) и живой статус URL — см. `docs/desktop-client.md`.
 - Панель: страница **Узлы** (subscription.nodes, пиры, файлы правил, node_id/public_key), страница **Маршруты** (конструктор цепочек из 1–3 hop-ов) и **Профили** (route_ru/route_non_ru/route_private выбираются из маршрутов).
 - Тесты: 15 (хранилище, панель, репликация, auth, split-routing, subscription).
 - **Задеплоено** на `157.228.134.211` (ru-2, домен `fimdi.ru`), `177.3.220.12` (fi-1, FI) и `2.27.37.211` (de-1): VPN 8443, admin 127.0.0.1:8444, репликация, подписки, правила, split-routing, relay-цепочка FI→DE.
@@ -755,7 +756,8 @@ GET /rules/latest             -> latest version metadata + URL
 
 ### Следующие шаги
 
-1. UI импорта подписки в Android (сейчас через Advanced JSON) и desktop.
+1. UI импорта подписки в Android (сейчас через Advanced JSON). На desktop
+   импорт уже есть — см. `docs/desktop-client.md`.
 2. Фоновое автообновление подписки/правил в Android.
 3. UI панели для редактирования узлов/маршрутов/списков.
 4. Деплой панели и обновлённого сервера на оба узла.

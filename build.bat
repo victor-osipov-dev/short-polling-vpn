@@ -21,6 +21,11 @@ pyinstaller --noconfirm --onefile --windowed ^
     --hidden-import socks5_server ^
     --hidden-import protocol ^
     --hidden-import crypto_utils ^
+    --hidden-import subscription ^
+    --hidden-import split_routing ^
+    --hidden-import desktop_client ^
+    --hidden-import desktop_config ^
+    --hidden-import connection_test ^
     --hidden-import pystray ^
     --hidden-import PIL ^
     --hidden-import PIL.Image ^

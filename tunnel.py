@@ -104,10 +104,9 @@ class ClientTunnel:
         verify_tls = client_cfg.get("verify_tls", True)
         trust_env = client_cfg.get("trust_env_proxy", False)
 
-        self.enc_key = derive_key(sec_cfg["psk"].strip())
-        self.hmac_key = derive_hmac_key(sec_cfg["psk"].strip())
-
-        # Per-user режим: пользователь и устройство из подписки.
+        # Per-user режим: пользователь и устройство из подписки. Ключи в этом
+        # режиме выводятся из секрета пользователя, поэтому общий PSK может
+        # быть пустым/плейсхолдером — не трогаем его раньше времени.
         user_cfg = cfg.get("user") or {}
         self.user_id = str(user_cfg.get("uuid") or "").strip()
         self.device_id = str(user_cfg.get("device_id") or "").strip()
@@ -122,6 +121,15 @@ class ClientTunnel:
         else:
             self.user_id = ""
             self.device_id = ""
+            psk = str(sec_cfg.get("psk") or "").strip()
+            try:
+                self.enc_key = derive_key(psk)
+                self.hmac_key = derive_hmac_key(psk)
+            except Exception as exc:
+                raise ValueError(
+                    "invalid security.psk (must be base64 of 32 bytes) and no "
+                    f"per-user secret in subscription: {exc}"
+                ) from exc
 
         idle_cfg = client_cfg.get("idle_timeout", {})
         self.idle_timeout_enabled = idle_cfg.get("enabled", False)
@@ -161,7 +169,19 @@ class ClientTunnel:
         self._poll_count = 0
         self._health_inflight: set[str] = set()
 
+        self._on_log = None
+
         logger.info("client_id=%s", self.client_id.hex())
+
+    def set_log_callback(self, cb):
+        """Подписывает GUI/вызывающий код на сообщения туннеля."""
+        self._on_log = cb
+
+    def log(self, msg: str):
+        if self._on_log:
+            self._on_log(msg)
+        else:
+            logger.info(msg)
 
     def apply_config(self, cfg: dict):
         """Применяет новые настройки из config.yaml без перезапуска.
@@ -331,6 +351,35 @@ class ClientTunnel:
         base = pool[self._rr_index % len(pool)]
         self._rr_index += 1
         return base
+
+    def url_status(self) -> list[dict]:
+        """Снимок состояния URL для UI: включён, карантин, счётчик ошибок."""
+        now = time.time()
+        status = []
+        for url in self.all_server_urls:
+            until = self._url_cooldown_until.get(url, 0)
+            quarantined = until > now
+            status.append({
+                "url": url,
+                "enabled": url not in self.disabled_urls,
+                "quarantined": quarantined,
+                "cooldown_remaining": max(0, int(round(until - now))) if quarantined else 0,
+                "errors": int(self._url_failures.get(url, 0)),
+            })
+        return status
+
+    def reset_url_status(self) -> None:
+        """Сбрасывает счётчики ошибок и карантин всех URL."""
+        self._url_failures.clear()
+        self._url_cooldown_until.clear()
+        self._all_q_logged = False
+        logger.info("URL error counters and quarantines reset")
+
+    def set_disabled_urls(self, disabled) -> None:
+        """Обновляет список выключенных URL на лету (без перезапуска)."""
+        self.disabled_urls = {str(u).rstrip("/") for u in (disabled or []) if u}
+        self.server_urls = [u for u in self.all_server_urls if u not in self.disabled_urls]
+        self._no_url_warned = False
 
     # ── Polling loop ──
 

@@ -206,7 +206,8 @@ Payload на entry/relay не расшифровывается. Максимум
 
 ## Что дальше
 
-- UI импорта подписки в Android (сейчас через Advanced JSON) и desktop;
+- UI импорта подписки в Android (сейчас через Advanced JSON); на desktop
+  импорт уже есть — см. `docs/desktop-client.md`;
 - фоновое автообновление подписки/правил;
 - relay-цепочки entry → exit (Этап 3);
 - UI панели для узлов/маршрутов/списков.
