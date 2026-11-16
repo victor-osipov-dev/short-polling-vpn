@@ -235,6 +235,69 @@ class TestHelperProtocol(unittest.TestCase):
         client.quit()
         self.assertTrue(lines, "helper log lines should reach the client")
 
+    def test_connect_is_idempotent(self):
+        client = tun_mode.TunHelperClient()
+        self.assertTrue(client.connect(self.port, self.token, allow_launch=False))
+        sock = client._sock
+        self.assertTrue(client.connect(self.port, self.token, allow_launch=False))
+        self.assertIs(client._sock, sock)
+        self.assertTrue(client.ping()["ok"])
+        client.quit()
+
+    def test_matches_port_and_token(self):
+        client = tun_mode.TunHelperClient()
+        self.assertTrue(client.connect(self.port, self.token, allow_launch=False))
+        self.assertTrue(client.matches(self.port, self.token))
+        self.assertFalse(client.matches(self.port, "other"))
+        self.assertFalse(client.matches(self.port + 1, self.token))
+        client.quit()
+
+
+@unittest.skipUnless(tun_mode.IS_WINDOWS, "ShellExecuteW is Windows-only")
+class TestHelperLaunch(unittest.TestCase):
+    """Параметры запуска elevated-помощника (без реального UAC)."""
+
+    def _capture(self, kind: str, idle_timeout: float = 600.0) -> dict:
+        recorded: dict = {}
+
+        def fake_shell(_hwnd, verb, exe, params, _cwd, _show):
+            recorded.update(verb=verb, exe=exe, params=params)
+            return 42  # ShellExecuteW: > 32 — успех
+
+        with mock.patch.object(tun_mode, "_python_for_helper",
+                               return_value=("C:/x/VPN Client.exe", kind)), \
+                mock.patch.object(tun_mode.ctypes.windll.shell32,
+                                  "ShellExecuteW", side_effect=fake_shell):
+            tun_mode.launch_elevated_helper(41417, "tok", idle_timeout=idle_timeout)
+        return recorded
+
+    def test_frozen_passes_tun_helper_and_idle_timeout(self):
+        rec = self._capture("frozen")
+        self.assertEqual(rec["verb"], "runas")
+        self.assertEqual(rec["exe"], "C:/x/VPN Client.exe")
+        self.assertIn("--tun-helper", rec["params"])
+        self.assertIn("--port 41417", rec["params"])
+        self.assertIn('--token "tok"', rec["params"])
+        self.assertIn("--idle-timeout 600", rec["params"])
+
+    def test_script_mode_passes_helper_script(self):
+        rec = self._capture("script")
+        self.assertIn("vpn_helper.py", rec["params"])
+        self.assertIn("--port 41417", rec["params"])
+        self.assertIn("--idle-timeout 600", rec["params"])
+
+    def test_zero_idle_timeout_is_omitted(self):
+        rec = self._capture("frozen", idle_timeout=0)
+        self.assertNotIn("--idle-timeout", rec["params"])
+
+    def test_launch_failure_raises(self):
+        with mock.patch.object(tun_mode, "_python_for_helper",
+                               return_value=("C:/x/VPN Client.exe", "frozen")), \
+                mock.patch.object(tun_mode.ctypes.windll.shell32,
+                                  "ShellExecuteW", return_value=5):
+            with self.assertRaises(PermissionError):
+                tun_mode.launch_elevated_helper(41417, "tok")
+
 
 class TestDnsHijack(unittest.TestCase):
     """Переключение и восстановление DNS без реальных изменений системы."""

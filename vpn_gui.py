@@ -1657,8 +1657,17 @@ class VpnGui:
             if ip and ip not in bypass:
                 bypass.append(ip)
 
-        helper = tun_mode.TunHelperClient(on_log=lambda m: self._log(m, "INFO"))
-        self._tun_helper = helper
+        helper = self._tun_helper
+        if helper is None or not helper.matches(port, token):
+            # Порт/токен сменились — старый помощник больше не нужен.
+            if helper is not None:
+                try:
+                    helper.quit()
+                except Exception:
+                    pass
+            helper = tun_mode.TunHelperClient(
+                on_log=lambda m: self._log(m, "INFO"))
+            self._tun_helper = helper
         try:
             if not helper.connect(port, token):
                 self._tun_error = "helper"
@@ -1709,7 +1718,6 @@ class VpnGui:
 
     def _stop_tun(self):
         helper = self._tun_helper
-        self._tun_helper = None
         self._tun_active = False
         self._tun_error = ""
         self._tun_route_busy = False
@@ -1719,7 +1727,9 @@ class VpnGui:
             helper.stop_tun()
         except Exception as exc:
             self._log(f"TUN stop error: {exc}", "WARNING")
-        # Помощник переиспользуется между подключениями — не выходим.
+        # Помощник и его соединение переиспользуются между подключениями:
+        # так повторный Connect не требует нового UAC, а закрытие приложения
+        # (/quit) гасит его окончательно.
 
     def _verify_system_proxy(self) -> str:
         if sys.platform != "win32":
@@ -1831,13 +1841,18 @@ class VpnGui:
             except Exception:
                 pass
             try:
-                if self._tunnel:
-                    loop.run_until_complete(self._tunnel.stop())
+                if poll_task:
+                    # Сначала гасим poll-задачу и даём ей завершиться: иначе
+                    # при остановленном loop она остаётся pending и Python
+                    # печатает "Task was destroyed but it is pending".
+                    poll_task.cancel()
+                    loop.run_until_complete(
+                        asyncio.gather(poll_task, return_exceptions=True))
             except Exception:
                 pass
             try:
-                if poll_task:
-                    poll_task.cancel()
+                if self._tunnel:
+                    loop.run_until_complete(self._tunnel.stop())
             except Exception:
                 pass
 
@@ -1942,10 +1957,12 @@ class VpnGui:
                 self._tray.stop()
             except Exception:
                 pass
+        # Запоминаем помощник ДО _stop(): _stop_tun() обнуляет ссылку,
+        # но именно на нём нужно отправить quit, иначе elevated-процесс
+        # останется висеть после закрытия приложения.
+        helper = self._tun_helper
         if self.running:
             self._stop()
-        # Гасим elevated-помощник, если он ещё жив.
-        helper = self._tun_helper
         self._tun_helper = None
         if helper is not None:
             try:

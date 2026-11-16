@@ -51,6 +51,10 @@ IS_WINDOWS = sys.platform == "win32"
 DEFAULT_TUN_MTU = 1500
 DEFAULT_DNS_MODE = "virtual"  # virtual | over-tcp | direct
 DEFAULT_HELPER_PORT = 41417
+# Сколько elevated-помощник ждёт нового подключения GUI после отключения.
+# В этом окне повторный запуск приложения не требует UAC, но забытый
+# административный процесс не остаётся навсегда.
+HELPER_IDLE_TIMEOUT = 900.0
 
 # Описания/алиасы адаптеров, которые считаем «виртуальными» и не берём
 # как физический выход в интернет.
@@ -679,6 +683,8 @@ def run_helper_server(port: int, token: str, idle_timeout: float = 0.0) -> None:
             finally:
                 tun.stop()
                 conn.close()
+                # Отсчёт простоя начинается с момента отключения GUI.
+                last_client = time.time()
     finally:
         try:
             srv.close()
@@ -783,16 +789,24 @@ def _ps_quote(arg: str) -> str:
     return '"' + str(arg).replace('"', r'\"') + '"'
 
 
-def launch_elevated_helper(port: int, token: str) -> None:
-    """Просит UAC и запускает помощник. Бросает при отказе/ошибке."""
+def launch_elevated_helper(port: int, token: str,
+                           idle_timeout: float = HELPER_IDLE_TIMEOUT) -> None:
+    """Просит UAC и запускает помощник. Бросает при отказе/ошибке.
+
+    idle_timeout — сколько секунд помощник живёт после отключения GUI.
+    Так повторный запуск приложения в этом окне не требует нового UAC,
+    но забытый elevated-процесс не остаётся навсегда.
+    """
     if not IS_WINDOWS:
         raise RuntimeError("TUN helper is Windows-only")
     exe, kind = _python_for_helper()
+    tail = f" --idle-timeout {int(idle_timeout)}" if idle_timeout > 0 else ""
     if kind == "frozen":
-        params = f"--tun-helper --port {int(port)} --token {_ps_quote(token)}"
+        params = f"--tun-helper --port {int(port)} --token {_ps_quote(token)}{tail}"
     else:
         helper_py = Path(__file__).resolve().parent / "vpn_helper.py"
-        params = f"{_ps_quote(str(helper_py))} --port {int(port)} --token {_ps_quote(token)}"
+        params = (f"{_ps_quote(str(helper_py))} --port {int(port)} "
+                  f"--token {_ps_quote(token)}{tail}")
     rc = ctypes.windll.shell32.ShellExecuteW(
         None, "runas", exe, params, str(Path.cwd()), 0)
     if int(rc) <= 32:
@@ -833,11 +847,23 @@ class TunHelperClient:
     def is_connected(self) -> bool:
         return self._sock is not None
 
+    def matches(self, port: int, token: str) -> bool:
+        """Подходит ли текущее соединение под эти порт/токен."""
+        return (self._sock is not None and self._port == int(port)
+                and self._token == str(token))
+
     def connect(self, port: int, token: str, wait: float = 25.0,
                 allow_launch: bool = True) -> bool:
         """Подключается к помощнику; при необходимости поднимает его (UAC)."""
         self._port = int(port)
         self._token = str(token)
+        if self.matches(port, token):
+            # Уже подключены теми же портом/токеном: второе соединение
+            # заняло бы accept-очередь помощника, а старое осталось бы
+            # висеть в _serve_client.
+            return True
+        if self._sock is not None:
+            self._close()
         if self._try_connect():
             return True
         if not allow_launch:
