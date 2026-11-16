@@ -305,13 +305,14 @@ def _set_interface_dns(alias: str, servers: list[str]) -> bool:
         return False
     addrs = ",".join("'" + s.replace("'", "''") + "'" for s in servers if s)
     safe_alias = alias.replace("'", "''")
+    # Один запуск PowerShell на всё: Clear-DnsClientCache отдельным процессом
+    # заметно удлиняет Disconnect.
     rc, out = _ps_run(
         f"Set-DnsClientServerAddress -InterfaceAlias '{safe_alias}' "
-        f"-ServerAddresses @({addrs})")
+        f"-ServerAddresses @({addrs}); Clear-DnsClientCache")
     if rc != 0:
         logger.warning("set DNS on %s failed: %s", alias, out)
         return False
-    _ps_run("Clear-DnsClientCache")
     return True
 
 
@@ -320,11 +321,11 @@ def _reset_interface_dns(alias: str) -> bool:
         return False
     safe_alias = alias.replace("'", "''")
     rc, out = _ps_run(
-        f"Set-DnsClientServerAddress -InterfaceAlias '{safe_alias}' -ResetServerAddresses")
+        f"Set-DnsClientServerAddress -InterfaceAlias '{safe_alias}' "
+        f"-ResetServerAddresses; Clear-DnsClientCache")
     if rc != 0:
         logger.warning("reset DNS on %s failed: %s", alias, out)
         return False
-    _ps_run("Clear-DnsClientCache")
     return True
 
 

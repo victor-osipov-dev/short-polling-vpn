@@ -215,6 +215,12 @@ class VpnGui:
         self._tun_error = ""
         self._tun_route_busy = False
         self._phys_adapter: dict | None = None
+        # Disconnect/Quit выполняются в фоновом потоке: остановка помощника
+        # включает восстановление DNS через PowerShell и может занять
+        # несколько секунд. Держим UI отзывчивым.
+        self._stopping = False
+        self._closing = False
+        self._pump_stopped = False
         # Очередь задач в главный поток: туннель, тесты, импорт и трей
         # работают в своих потоках, а tkinter трогать оттуда нельзя —
         # root.after() из чужого потока на Windows падает с
@@ -1495,12 +1501,16 @@ class VpnGui:
     # ══════════════════════════════════════════════════════════════════
 
     def _on_toggle(self):
+        if self._stopping:
+            return
         if self.running:
             self._stop()
         else:
             self._start()
 
     def _start(self):
+        if self._stopping:
+            return
         self._reload_display_config()
         if not self.active_profile:
             messagebox.showwarning(tr("No profile", "Нет профиля"),
@@ -1751,24 +1761,57 @@ class VpnGui:
         return "UNKNOWN"
 
     def _stop(self):
+        if self._stopping:
+            return
+        self._stopping = True
         self.running = False
-        self.start_btn.configure(text="Connect", bg=BTN_ON, fg="white")
+        self._update_status(False)
+        self.info_label.configure(text=tr("Disconnecting...", "Отключение..."))
+        self._log("VPN stopping...", "INFO")
+        self.start_btn.configure(text=tr("Disconnecting...", "Отключение..."),
+                                 bg=BTN_OFF, fg="white", state=tk.DISABLED)
+        threading.Thread(target=self._stop_worker, daemon=True).start()
+
+    def _teardown(self, join_timeout: float = 12.0) -> None:
+        """Блокирующая остановка: TUN, системный прокси, loop, поток."""
+        try:
+            self._stop_tun()
+        except Exception as exc:
+            self._log(f"TUN stop failed: {exc}", "WARNING")
+        try:
+            set_system_proxy_windows("127.0.0.1", self.socks_port,
+                                     self.http_port, False)
+        except Exception as exc:
+            self._log(f"System proxy clear failed: {exc}", "WARNING")
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=join_timeout)
+        self._loop = None
+        self._thread = None
+        self._tunnel = None
+
+    def _stop_worker(self):
+        try:
+            self._teardown()
+            self._last_url_status = {}
+            self._log("System proxy cleared.", "INFO")
+        finally:
+            self._post(self._finish_stop)
+
+    def _finish_stop(self):
+        self._stopping = False
+        self.running = False
+        self.start_btn.configure(text="Connect", bg=BTN_ON, fg="white",
+                                 state=tk.NORMAL)
         self._update_status(False)
         self.info_label.configure(text=tr("Disconnected.", "Отключено."))
-        self._log("VPN stopping...", "INFO")
-
-        self._stop_tun()
-        set_system_proxy_windows("127.0.0.1", self.socks_port, self.http_port, False)
-        self._log("System proxy cleared.", "INFO")
-        self._last_url_status = {}
-
-        if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3)
-        self._thread = None
-        self._loop = None
-        self._tunnel = None
+        self._log("Disconnected.", "INFO")
 
     def _run_loop(self):
         loop = self._loop
@@ -1901,7 +1944,12 @@ class VpnGui:
                 fn(*args)
             except Exception as exc:
                 logging.getLogger("vpn-gui").warning("main-queue task failed: %s", exc)
-        self.root.after(120, self._pump_main_queue)
+        if self._pump_stopped:
+            return
+        try:
+            self.root.after(120, self._pump_main_queue)
+        except tk.TclError:
+            pass
 
     def _log(self, msg: str, level: str = "INFO"):
         # Туннель живёт в своём потоке и зовёт лог-колбэк оттуда: tkinter
@@ -1951,25 +1999,42 @@ class VpnGui:
         self._on_hide()
 
     def _quit_app(self):
+        if self._closing:
+            return
+        self._closing = True
         self._stop_config_watcher()
         if hasattr(self, "_tray") and self._tray:
             try:
                 self._tray.stop()
             except Exception:
                 pass
-        # Запоминаем помощник ДО _stop(): _stop_tun() обнуляет ссылку,
-        # но именно на нём нужно отправить quit, иначе elevated-процесс
-        # останется висеть после закрытия приложения.
+        # Прячем окно сразу, а всё остальное (TUN, loop, elevated-помощник)
+        # гасим в фоне — иначе выход «зависает» на восстановлении DNS.
+        self.root.withdraw()
+        threading.Thread(target=self._quit_worker, daemon=True).start()
+
+    def _quit_worker(self):
+        # Если Disconnect уже идёт, дождёмся его, чтобы не дёргать TUN дважды.
+        deadline = time.time() + 30.0
+        while self._stopping and time.time() < deadline:
+            time.sleep(0.05)
+        if self.running or self._thread is not None or self._tun_active:
+            self._teardown()
         helper = self._tun_helper
-        if self.running:
-            self._stop()
         self._tun_helper = None
         if helper is not None:
             try:
                 helper.quit()
             except Exception:
                 pass
-        self.root.destroy()
+        self._post(self._destroy_root)
+
+    def _destroy_root(self):
+        self._pump_stopped = True
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════
