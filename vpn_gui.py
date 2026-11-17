@@ -33,7 +33,8 @@ from PIL import Image, ImageDraw
 # ── Импорт движка из общих модулей ──
 from tunnel import ClientTunnel
 from socks5_server import handle_socks_client
-from desktop_client import handle_http_client, set_system_proxy_windows
+from desktop_client import (handle_http_client, set_system_proxy_windows,
+                            get_system_proxy_windows, restore_system_proxy_windows)
 from desktop_config import DesktopConfig, default_profile_config
 from connection_test import test_profile
 import tun_mode
@@ -609,6 +610,12 @@ class VpnGui:
         self._tun_error = ""
         self._tun_route_busy = False
         self._phys_adapter: dict | None = None
+        # Системный прокси ставим только сами и только если включён режим
+        # Proxy / VPN (system proxy); перед этим запоминаем чужой прокси,
+        # чтобы вернуть его на Disconnect.
+        self._proxy_snapshot: dict = {}
+        self._proxy_applied = False
+        self._proxy_lock = threading.Lock()
         # Disconnect/Quit выполняются в фоновом потоке: остановка помощника
         # включает восстановление DNS через PowerShell и может занять
         # несколько секунд. Держим UI отзывчивым.
@@ -2485,13 +2492,50 @@ class VpnGui:
     def _use_tun(self) -> bool:
         return self._vpn_backend() == "tun"
 
+    def _use_system_proxy(self) -> bool:
+        """Нужно ли заворачивать системный прокси Windows на наш HTTP-порт.
+
+        Режим Proxy — это готовый SOCKS5/HTTP на localhost; без системного
+        прокси обычные приложения (браузер, Electron) в него не ходят, и
+        режим выглядел «включённым, но неработающим».
+        """
+        if not self.active_profile or sys.platform != "win32":
+            return False
+        if self.socks_host not in ("0.0.0.0", "127.0.0.1", "localhost"):
+            return False
+        return (self.active_profile.get("mode") == "proxy"
+                or self._vpn_backend() == "system")
+
+    def _apply_system_proxy(self) -> None:
+        with self._proxy_lock:
+            if self._proxy_applied:
+                return
+            if not self._proxy_snapshot:
+                self._proxy_snapshot = get_system_proxy_windows()
+            set_system_proxy_windows("127.0.0.1", self.socks_port,
+                                     self.http_port, True)
+            self._proxy_applied = True
+        self._log(f"System proxy → 127.0.0.1:{self.http_port}", "INFO")
+
+    def _restore_system_proxy(self) -> None:
+        with self._proxy_lock:
+            if not self._proxy_applied:
+                return
+            snapshot, self._proxy_snapshot = self._proxy_snapshot, {}
+            self._proxy_applied = False
+        if snapshot:
+            restore_system_proxy_windows(snapshot)
+            self._log("System proxy restored to previous settings.", "INFO")
+        else:
+            set_system_proxy_windows("127.0.0.1", self.socks_port,
+                                     self.http_port, False)
+            self._log("System proxy cleared.", "INFO")
+
     def _schedule_proxy_guard(self):
         if not self.running:
             return
         # В TUN-режиме системный прокси не нужен (и вреден: двойной обход).
-        if (self.active_profile and self._vpn_backend() == "system"
-                and sys.platform == "win32"
-                and self.socks_host in ("0.0.0.0", "127.0.0.1", "localhost")):
+        if self._use_system_proxy():
             try:
                 import winreg
                 key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
@@ -2500,9 +2544,11 @@ class VpnGui:
                     server, _ = winreg.QueryValueEx(key, "ProxyServer")
                     needs_fix = (not enabled or "127.0.0.1" not in server
                                  or str(self.http_port) not in server)
-                if needs_fix:
+                if needs_fix or not self._proxy_applied:
                     self._log("Proxy was overwritten — re-setting", "WARNING")
-                    set_system_proxy_windows("127.0.0.1", self.socks_port, self.http_port, True)
+                    with self._proxy_lock:
+                        self._proxy_applied = False
+                    self._apply_system_proxy()
             except Exception:
                 pass
         self.root.after(3000, self._schedule_proxy_guard)
@@ -2587,12 +2633,21 @@ class VpnGui:
                 self._set_text(self.proxy_indicator, label, color)
             else:
                 proxy_status = self._verify_system_proxy()
+                http_addr = f"127.0.0.1:{self.http_port}"
                 self._set_text(
                     self.info_label,
-                    f"SOCKS {self.socks_port}   ·   HTTP {self.http_port}   ·   "
-                    f"PROXY {proxy_status}")
+                    f"SOCKS {self.socks_host}:{self.socks_port}   ·   "
+                    f"HTTP {http_addr}   ·   PROXY {proxy_status}")
                 self._set_text(self.proxy_indicator, f"PROXY: {proxy_status}",
                                FG_GREEN if proxy_status == "SET" else FG_RED)
+                if proxy_status == "SET":
+                    hint = tr(f"Connected · system proxy {http_addr}",
+                              f"Подключено · системный прокси {http_addr}")
+                    hint_color = FG_GREEN
+                else:
+                    hint = tr(f"Proxy is not applied — check {http_addr}",
+                              f"Прокси не применён — проверьте {http_addr}")
+                    hint_color = FG_AMBER
         if hint:
             if len(hint) > 70:
                 hint = hint[:67] + "…"
@@ -2737,10 +2792,9 @@ class VpnGui:
         except Exception as exc:
             self._log(f"TUN stop failed: {exc}", "WARNING")
         try:
-            set_system_proxy_windows("127.0.0.1", self.socks_port,
-                                     self.http_port, False)
+            self._restore_system_proxy()
         except Exception as exc:
-            self._log(f"System proxy clear failed: {exc}", "WARNING")
+            self._log(f"System proxy restore failed: {exc}", "WARNING")
         loop = self._loop
         if loop is not None and loop.is_running():
             try:
@@ -2758,7 +2812,6 @@ class VpnGui:
         try:
             self._teardown()
             self._last_url_status = {}
-            self._log("System proxy cleared.", "INFO")
         finally:
             self._post(self._finish_stop)
 
@@ -2818,15 +2871,10 @@ class VpnGui:
             if use_tun:
                 # SOCKS5 уже слушает: поднимаем Wintun и заворачиваем трафик.
                 self._start_tun()
-            else:
-                # Системный прокси ставим только в VPN-режиме: в режиме Proxy
-                # пользователь сам настраивает приложения на SOCKS5.
-                use_system_proxy = (sys.platform == "win32"
-                                    and self.active_profile
-                                    and self._vpn_backend() == "system"
-                                    and self.socks_host in ("0.0.0.0", "127.0.0.1", "localhost"))
-                if use_system_proxy:
-                    set_system_proxy_windows("127.0.0.1", self.socks_port, self.http_port, True)
+            elif self._use_system_proxy():
+                # Proxy/system-backend: без системного прокси приложения в
+                # наш SOCKS5/HTTP не ходят.
+                self._apply_system_proxy()
 
             loop.run_forever()
         except Exception as e:

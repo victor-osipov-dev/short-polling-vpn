@@ -333,6 +333,53 @@ def set_system_proxy_windows(host: str, socks_port: int, http_port: int, enable:
         logger.warning("Failed to set system proxy: %s", e)
 
 
+def get_system_proxy_windows() -> dict:
+    """Снимок текущих настроек прокси: {имя: (значение, тип)}."""
+    if sys.platform != "win32":
+        return {}
+    try:
+        import winreg
+        state: dict = {}
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
+            for name in ("ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL"):
+                try:
+                    state[name] = winreg.QueryValueEx(key, name)
+                except FileNotFoundError:
+                    continue
+        return state
+    except Exception as e:
+        logger.warning("Failed to read system proxy: %s", e)
+        return {}
+
+
+def restore_system_proxy_windows(state: dict) -> None:
+    """Возвращает прокси, который был до нас (или просто выключает его).
+
+    Без этого Disconnect гасил чужой прокси (v2rayN/корпоративный):
+    ProxyEnable=0 оставался после выхода из приложения.
+    """
+    if sys.platform != "win32":
+        return
+    if not state:
+        set_system_proxy_windows("127.0.0.1", 0, 0, False)
+        return
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if "ProxyEnable" not in state:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+            for name, (value, kind) in state.items():
+                winreg.SetValueEx(key, name, 0, kind, value)
+        _notify_proxy_change()
+        logger.info("System proxy restored: %s",
+                    state.get("ProxyServer", ("off", None))[0])
+    except Exception as e:
+        logger.warning("Failed to restore system proxy: %s", e)
+
+
 # ── Точка входа ──
 
 async def run_client(cfg: dict):
