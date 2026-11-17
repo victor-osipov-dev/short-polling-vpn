@@ -459,6 +459,56 @@ def default_route_alias() -> Optional[str]:
     return alias[0].strip() if alias and alias[0].strip() else None
 
 
+_PS_DEFAULT_ROUTES = (
+    "Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | "
+    "Sort-Object RouteMetric, InterfaceMetric | ForEach-Object { "
+    "$a = Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue; "
+    "[pscustomobject]@{ alias=$_.InterfaceAlias; "
+    "desc=[string]$a.InterfaceDescription; metric=[int]$_.RouteMetric } } | "
+    "ConvertTo-Json -Compress"
+)
+
+
+def foreign_tunnel_route(own_names: Optional[list[str]] = None) -> Optional[dict]:
+    """Чужой виртуальный адаптер, который уже держит default-route.
+
+    Проверяется ДО подключения: если другой VPN (sing-box, WireGuard,
+    OpenVPN…) перехватил маршрут по умолчанию, наш TUN поднимется, но
+    трафик в него не пойдёт — снаружи это выглядит как «VPN включён, а IP
+    не меняется». Физические адаптеры и собственный TUN игнорируются.
+
+    Возвращает {"alias", "desc", "metric"} или None.
+    """
+    if not IS_WINDOWS:
+        return None
+    own = {str(n).strip().lower() for n in (own_names or ("vpnclient",)) if n}
+    raw = _run_powershell(_PS_DEFAULT_ROUTES, timeout=10.0)
+    if not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        logger.debug("default routes json parse failed: %s", exc)
+        return None
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        alias = str(entry.get("alias") or "").strip()
+        desc = str(entry.get("desc") or "").strip()
+        if not alias or alias.lower() in own:
+            continue
+        if not _looks_virtual(f"{alias} {desc}"):
+            continue
+        try:
+            metric = int(entry.get("metric") or 0)
+        except (TypeError, ValueError):
+            metric = 0
+        return {"alias": alias, "desc": desc, "metric": metric}
+    return None
+
+
 def pick_free_port() -> int:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
