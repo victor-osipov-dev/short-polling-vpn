@@ -91,6 +91,19 @@ class DesktopConfigTest(unittest.TestCase):
         self.store.import_subscription(SAMPLE_SUB, "https://fimdi.ru/sub/token", select=False)
         self.assertEqual(self.store.load_profiles()[0]["config"]["user"]["device_id"], device)
 
+    def test_import_keeps_user_chosen_mode(self):
+        # Обновление подписки не должно возвращать Proxy/system в TUN.
+        self.store.import_subscription(SAMPLE_SUB, "https://fimdi.ru/sub/token")
+        germany = next(p for p in self.store.load_profiles() if p["name"] == "Германия")
+        germany["mode"] = "proxy"
+        germany["vpn_backend"] = "system"
+        self.store.update_profile(germany)
+
+        self.store.import_subscription(SAMPLE_SUB, "https://fimdi.ru/sub/token", select=False)
+        again = next(p for p in self.store.load_profiles() if p["name"] == "Германия")
+        self.assertEqual(again["mode"], "proxy")
+        self.assertEqual(again["vpn_backend"], "system")
+
     def test_engine_config_maps_routing(self):
         self.store.import_subscription(SAMPLE_SUB, "https://fimdi.ru/sub/token")
         germany = next(p for p in self.store.load_profiles() if p["name"] == "Германия")

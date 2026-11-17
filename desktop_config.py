@@ -406,7 +406,11 @@ class DesktopConfig:
                 profile = {
                     "id": existing_profile["id"] if existing_profile else local_id,
                     "name": str(cp.get("name") or "Profile"),
-                    "mode": "vpn" if str(cp.get("mode", "proxy")) == "vpn" else "proxy",
+                    # Пользовательский выбор режима не перетираем обновлением
+                    # подписки: иначе Proxy/system-proxy молча возвращаются в TUN.
+                    "mode": existing_profile["mode"] if existing_profile else
+                            ("vpn" if str(cp.get("mode", "proxy")) == "vpn" else "proxy"),
+                    "vpn_backend": (existing_profile or {}).get("vpn_backend", "tun"),
                     "config": updated,
                 }
                 self.update_profile(profile)
@@ -448,7 +452,10 @@ class DesktopConfig:
         profile = {
             "id": existing["id"] if existing else f"sub:{slug}:default",
             "name": display,
-            "mode": "vpn" if str((sub.get("user") or {}).get("mode", "proxy")) == "vpn" else "proxy",
+            # Сохраняем выбранный пользователем режим при обновлении подписки.
+            "mode": existing["mode"] if existing else
+                    ("vpn" if str((sub.get("user") or {}).get("mode", "proxy")) == "vpn" else "proxy"),
+            "vpn_backend": (existing or {}).get("vpn_backend", "tun"),
             "config": updated,
         }
         self.update_profile(profile)
