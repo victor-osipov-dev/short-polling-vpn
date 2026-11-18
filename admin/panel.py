@@ -199,6 +199,7 @@ class Panel:
             node_id=cfg.get("node_id", "master"),
             node_key_path=cfg.get("node_key"),
             peers=peers_map,
+            config_master=cfg.get("config_master", ""),
         )
         self.sessions = Sessions(int(cfg.get("session_ttl_hours", 12)))
         self.username = cfg.get("admin_username", "admin")

@@ -67,6 +67,11 @@ server:
   dns_resolver: "8.8.8.8"    # куда сервер пересылает DNS-запросы (IP или hostname)
   dns_resolver_port: 53
   admin_service_url: "http://127.0.0.1:8444"  # необязательно: /sub/<token> проксируется в панель
+  # Необязательно: выход через локальные SOCKS5-прокси по id последнего hop-а.
+  # Нужно для маршрутов вида «Россия -> внешний VLESS-узел»: xray поднимает
+  # локальный mixed-inbound в нужный outbound, сервер открывает соединения там.
+  egress_proxies:
+    xhttp-pl: "127.0.0.1:1101"   # id hop-а: адрес SOCKS5
   tls:
     cert: "/path/to/fullchain.pem"
     key: "/path/to/privkey.pem"

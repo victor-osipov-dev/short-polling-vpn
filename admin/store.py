@@ -247,7 +247,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
 class Store:
     def __init__(self, db_path: str, cluster_key_path: str, node_id: str = "master",
                  node_key_path: Optional[str] = None,
-                 peers: Optional[dict[str, str]] = None):
+                 peers: Optional[dict[str, str]] = None,
+                 config_master: str = ""):
         self.db_path = db_path
         self.cluster_key_path = cluster_key_path
         self.node_id = node_id
@@ -256,6 +257,10 @@ class Store:
         )
         # peers: node_id -> Ed25519 public key (base64url, raw)
         self.peers = dict(peers or {})
+        # Если задан, маршруты/профили принимаются только от этого узла.
+        # Остальные ноды могут реплицировать пользователей и устройства,
+        # но не перезаписывать конфигурацию маршрутизации.
+        self.config_master = str(config_master or "")
         self.on_op = None
         self.lock = threading.RLock()
         parent = os.path.dirname(os.path.abspath(db_path))
@@ -500,6 +505,13 @@ class Store:
         with self.lock:
             if self.conn.execute("SELECT 1 FROM applied_ops WHERE op_id=?", (op_id,)).fetchone():
                 return "skipped"
+            if (entity in ("route", "profile") and self.config_master
+                    and origin != self.config_master):
+                # Конфигурацию маршрутизации ведёт только мастер; старые
+                # ops от других мастеров не должны её перезаписывать.
+                self._record_applied(op_id)
+                self.conn.commit()
+                return "skipped"
             if entity == "user":
                 if kind == "delete":
                     self.conn.execute("DELETE FROM users WHERE uuid=?", (entity_key,))
@@ -544,14 +556,24 @@ class Store:
             elif entity == "profile":
                 if kind == "delete":
                     self.conn.execute("DELETE FROM client_profiles WHERE id=?", (entity_key,))
+                    self._bury(entity_key, hlc)
                 elif kind == "upsert":
+                    if self._tombstoned(entity_key, hlc):
+                        self._record_applied(op_id)
+                        self.conn.commit()
+                        return "skipped"
                     self._upsert_client_profile(payload, entity_key)
                 else:
                     raise ValueError("bad profile op")
             elif entity == "route":
                 if kind == "delete":
                     self.conn.execute("DELETE FROM routes WHERE id=?", (entity_key,))
+                    self._bury(entity_key, hlc)
                 elif kind == "upsert":
+                    if self._tombstoned(entity_key, hlc):
+                        self._record_applied(op_id)
+                        self.conn.commit()
+                        return "skipped"
                     self._upsert_route(payload, entity_key)
                 else:
                     raise ValueError("bad route op")
@@ -569,6 +591,19 @@ class Store:
             "INSERT OR IGNORE INTO applied_ops(op_id,applied_at) VALUES(?,?)",
             (op_id, now_ms()),
         )
+
+    def _bury(self, entity_key: str, hlc: int) -> None:
+        """Запоминает удаление, чтобы старые upsert-ops не воскресили запись."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO tombstones(uuid,deleted_at) VALUES(?,?)",
+            (entity_key, hlc),
+        )
+
+    def _tombstoned(self, entity_key: str, hlc: int) -> bool:
+        tomb = self.conn.execute(
+            "SELECT deleted_at FROM tombstones WHERE uuid=?", (entity_key,)
+        ).fetchone()
+        return bool(tomb and tomb["deleted_at"] >= hlc)
 
     def _upsert_user(self, payload: dict, user_uuid: str) -> None:
         cols = ("uuid", "name", "note", "enabled", "expires_at", "max_devices",
@@ -645,6 +680,8 @@ class Store:
                 value = "direct"
             elif col == "mode" and not value:
                 value = "proxy"
+            elif col == "updated_by":
+                value = str(value or "")
             values.append(value)
         placeholders = ",".join("?" for _ in cols)
         updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "id")
@@ -667,6 +704,8 @@ class Store:
                 value = int(value or 0)
             elif col in ("created_at", "updated_at"):
                 value = int(value or now_ms())
+            elif col == "updated_by":
+                value = str(value or "")
             values.append(value)
         placeholders = ",".join("?" for _ in cols)
         updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "id")
@@ -1015,7 +1054,15 @@ class Store:
 
     def _client_profile_payload(self, profile_id: str) -> dict:
         profile = self.get_client_profile(profile_id)
-        return profile.to_public() if profile else {}
+        if not profile:
+            return {}
+        payload = profile.to_public()
+        payload.update({
+            "created_at": profile.created_at,
+            "updated_at": profile.updated_at,
+            "updated_by": profile.updated_by,
+        })
+        return payload
 
     # ── routes (конструктор цепочек) ─────────────────────────────────
 
@@ -1099,7 +1146,15 @@ class Store:
 
     def _route_payload(self, route_id: str) -> dict:
         route = self.get_route(route_id)
-        return route.to_public() if route else {}
+        if not route:
+            return {}
+        payload = route.to_public()
+        payload.update({
+            "created_at": route.created_at,
+            "updated_at": route.updated_at,
+            "updated_by": route.updated_by,
+        })
+        return payload
 
     # ── audit read ───────────────────────────────────────────────────
 
