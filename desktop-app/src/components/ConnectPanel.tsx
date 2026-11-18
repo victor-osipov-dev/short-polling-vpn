@@ -196,7 +196,7 @@ export function ConnectPanel({
             </span>
             <span className="route-pill">
               <span className="dot" />
-              Адаптер <b>fimdi-tun</b>
+              Адаптер <b>custom-tun</b>
             </span>
           </div>
         )}

@@ -985,7 +985,7 @@ class Backend:
                 {
                     "type": "tun",
                     "tag": "tun-in",
-                    "interface_name": "fimdi-tun",
+                    "interface_name": "custom-tun",
                     "address": ["172.19.0.1/30"],
                     "mtu": 1400,
                     "auto_route": True,
@@ -1096,7 +1096,7 @@ foreach ($p in $procs) {
 }
 Start-Sleep -Milliseconds 500
 Get-NetAdapter -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -in @('fimdi-tun','singbox_tun') } |
+  Where-Object { $_.Name -in @('custom-tun','fimdi-tun','singbox_tun') } |
   Remove-NetAdapter -Force -Confirm:$false -ErrorAction SilentlyContinue
 """
         try:

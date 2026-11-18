@@ -94,7 +94,7 @@ export function SubscriptionPanel({ state, busy, onLoad, onRefresh, onGoProfiles
           </div>
           <div className="feature">
             <b>TUN-режим</b>
-            sing-box поднимает адаптер fimdi-tun и ведёт через него весь трафик. Требуются права
+            sing-box поднимает адаптер custom-tun и ведёт через него весь трафик. Требуются права
             администратора.
           </div>
           <div className="feature">

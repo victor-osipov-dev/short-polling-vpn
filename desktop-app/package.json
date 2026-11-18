@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Short Polling VPN desktop client — subscription profiles, system proxy and TUN mode",
-  "author": "FIMDI",
+  "author": "Short Polling VPN",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k -n vite,electron -c cyan,magenta \"vite\" \"wait-on tcp:127.0.0.1:5173 && electron . --dev\"",
