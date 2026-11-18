@@ -1,4 +1,4 @@
-"""FIMDI VPN desktop backend.
+"""Short Polling VPN desktop backend.
 
 Headless control process for the Electron UI:
 
@@ -53,13 +53,14 @@ from tunnel import ClientTunnel  # noqa: E402
 from socks5_server import run_socks5_server  # noqa: E402
 from desktop_client import run_http_proxy_server, _PROXY_OVERRIDES  # noqa: E402
 
-APP_NAME = "FIMDI VPN"
+APP_NAME = "Short Polling VPN"
 VERSION = "1.0.0"
 SOCKS_PORT = 8890
 HTTP_PORT = 8891
 DEFAULT_API_PORT = 8899
 
-SETTINGS_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "FimdiVPN"
+SETTINGS_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "ShortPollingVPN"
+LEGACY_SETTINGS_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "FimdiVPN"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 PROXY_BACKUP_FILE = SETTINGS_DIR / "proxy-backup.json"
 
@@ -159,6 +160,15 @@ def is_admin() -> bool:
 
 
 def load_settings() -> dict:
+    # Migrate preferences from the old application name (FimdiVPN).
+    try:
+        if not SETTINGS_FILE.exists():
+            legacy = LEGACY_SETTINGS_DIR / "settings.json"
+            if legacy.exists():
+                SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy, SETTINGS_FILE)
+    except Exception:
+        pass
     try:
         return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -282,11 +292,39 @@ class SystemProxy:
             if not PROXY_BACKUP_FILE.exists():
                 return
             backup = json.loads(PROXY_BACKUP_FILE.read_text(encoding="utf-8"))
-            current = self._read()
-            if self._ours(current):
-                self._write(backup)
-                _append_log("INFO", "Восстановлены настройки системного прокси после прошлого запуска")
+            # On startup there is no active session to compare against, so
+            # replay the saved state (proxy mode or TUN suspend).
+            self._write(backup)
+            _append_log("INFO", "Восстановлены настройки системного прокси после прошлого запуска")
             PROXY_BACKUP_FILE.unlink(missing_ok=True)
+        except Exception as exc:
+            _append_log("WARNING", f"Не удалось восстановить системный прокси: {exc}")
+
+    def suspend(self) -> None:
+        """Disable any system proxy while TUN owns all traffic, and remember
+        the previous state so it can be restored on disconnect."""
+        if sys.platform != "win32":
+            return
+        current = self._read()
+        try:
+            SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+            PROXY_BACKUP_FILE.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+            self._write({"ProxyEnable": 0})
+            _append_log("INFO", "Системный прокси временно отключён (активен TUN)")
+        except Exception as exc:
+            _append_log("WARNING", f"Не удалось отключить системный прокси для TUN: {exc}")
+
+    def resume(self) -> None:
+        """Restore settings saved by suspend() or by a previous crash."""
+        if sys.platform != "win32":
+            return
+        try:
+            if not PROXY_BACKUP_FILE.exists():
+                return
+            backup = json.loads(PROXY_BACKUP_FILE.read_text(encoding="utf-8"))
+            self._write(backup)
+            PROXY_BACKUP_FILE.unlink(missing_ok=True)
+            _append_log("INFO", "Настройки системного прокси восстановлены")
         except Exception as exc:
             _append_log("WARNING", f"Не удалось восстановить системный прокси: {exc}")
 
@@ -400,8 +438,10 @@ class Backend:
         self.singbox: subprocess.Popen | None = None
         self.singbox_cfg_path: Path | None = None
         self.singbox_error: str | None = None
+        self._added_routes: list[str] = []
         self._session_lock = threading.RLock()
         self._exit_task_loop: asyncio.AbstractEventLoop | None = None
+        self._needed_urls: list[str] = []
 
         # If a subscription URL was saved, try to load it lazily in the
         # background so the window can paint immediately.
@@ -719,13 +759,14 @@ class Backend:
         if needed_urls:
             cfg["client"]["server_urls"] = needed_urls
             cfg["client"]["server_url"] = needed_urls[0]
+        self._needed_urls = list(cfg["client"]["server_urls"])
         return cfg
 
     # ── connect / disconnect ───────────────────────────────────────────
 
     def _singbox_path(self) -> Path | None:
         candidates = [
-            Path(os.environ.get("FIMDI_SINGBOX") or ""),
+            Path(os.environ.get("SPVPN_SINGBOX") or os.environ.get("FIMDI_SINGBOX") or ""),
             APP_DIR.parent / "resources" / "sing-box" / "sing-box.exe",
             Path(sys.executable).resolve().parent / "sing-box.exe",
             Path(sys.executable).resolve().parent.parent / "sing-box" / "sing-box.exe",
@@ -863,6 +904,9 @@ class Backend:
             if mode == "proxy":
                 self.proxy.enable()
             else:
+                # A stale system proxy (v2rayN, old client, etc.) would
+                # intercept traffic while TUN is active and break the internet.
+                self.proxy.suspend()
                 await asyncio.to_thread(self._start_singbox, tunnel)
 
             with self.lock:
@@ -888,6 +932,7 @@ class Backend:
                 pass
             await asyncio.to_thread(self._stop_singbox)
             self.proxy.disable()
+            self.proxy.resume()
             with self._session_lock:
                 self.tunnel = None
             with self.lock:
@@ -906,8 +951,10 @@ class Backend:
             "8.8.8.8/32",
         }
         sub = self.sub or {}
-        for node in sub.get("nodes") or []:
-            url = str(node.get("url") or "")
+        urls = list(self._needed_urls or [])
+        if not urls:
+            urls = [str(n.get("url") or "") for n in sub.get("nodes") or []]
+        for url in urls:
             if not url:
                 continue
             try:
@@ -926,7 +973,7 @@ class Backend:
     def _tun_config(self) -> dict:
         excluded = self._resolve_node_ips()
         config = {
-            "log": {"level": "info", "timestamp": True},
+            "log": {"level": "warn", "timestamp": True},
             "dns": {
                 "servers": [
                     {"tag": "proxy-dns", "type": "https", "server": "1.1.1.1", "detour": "socks-out"},
@@ -955,7 +1002,7 @@ class Backend:
                     "server_port": SOCKS_PORT,
                     "version": "5",
                 },
-                {"type": "direct", "tag": "direct"},
+                {"type": "direct", "tag": "direct", "domain_resolver": "proxy-dns"},
             ],
             "route": {
                 "rules": [
@@ -963,13 +1010,103 @@ class Backend:
                     {"protocol": "dns", "action": "hijack-dns"},
                     {"ip_is_private": True, "outbound": "direct"},
                     {"process_name": ["python.exe", "pythonw.exe", "vpn-backend.exe"], "outbound": "direct"},
+                    # Our SOCKS5 upstream only supports TCP CONNECT. Reject
+                    # other UDP flows (QUIC etc.) so apps fall back to TCP
+                    # instead of asking sing-box for UDP ASSOCIATE.
+                    {"network": "udp", "action": "reject"},
                 ],
                 "final": "socks-out",
                 "auto_detect_interface": True,
-                "default_domain_resolver": "local-dns",
+                "default_domain_resolver": "proxy-dns",
             },
         }
         return config
+
+    def _physical_gateway(self) -> str:
+        if sys.platform != "win32":
+            return ""
+        script = (
+            "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } | "
+            "Sort-Object RouteMetric | Select-Object -First 1).NextHop"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", script],
+                capture_output=True, text=True, timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            gateway = (result.stdout or "").strip().splitlines()
+            return gateway[0].strip() if gateway else ""
+        except Exception:
+            return ""
+
+    def _add_poll_routes(self) -> None:
+        """Pin node IPs to the physical gateway before TUN takes over."""
+        if sys.platform != "win32":
+            return
+        gateway = self._physical_gateway()
+        if not gateway:
+            _append_log("WARNING", "Не найден физический шлюз — polling может идти через TUN")
+            return
+        for cidr in self._resolve_node_ips():
+            ip = cidr.split("/")[0]
+            try:
+                result = subprocess.run(
+                    ["route", "add", ip, "mask", "255.255.255.255", gateway, "metric", "1"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode == 0:
+                    self._added_routes.append(ip)
+                else:
+                    _append_log("WARNING", f"Не удалось добавить маршрут {ip}: {(result.stderr or '').strip()[:120]}")
+            except Exception as exc:
+                _append_log("WARNING", f"Не удалось добавить маршрут {ip}: {exc}")
+        if self._added_routes:
+            _append_log("INFO", f"Маршруты к узлам ({len(self._added_routes)}) идут мимо TUN")
+
+    def _remove_poll_routes(self) -> None:
+        if sys.platform != "win32":
+            return
+        for ip in list(self._added_routes):
+            try:
+                subprocess.run(
+                    ["route", "delete", ip],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                pass
+        if self._added_routes:
+            _append_log("INFO", "Специальные маршруты к узлам удалены")
+        self._added_routes.clear()
+
+    def _cleanup_stale_tun(self) -> None:
+        """Kill leftovers from a previous crash and remove their adapters."""
+        if sys.platform != "win32":
+            return
+        script = r"""
+$procs = Get-CimInstance Win32_Process -Filter "Name='sing-box.exe'" -ErrorAction SilentlyContinue
+foreach ($p in $procs) {
+  $cl = [string]$p.CommandLine
+  if ($cl -like '*sing-box-tun.json*' -or $cl -like '*ShortPollingVPN*' -or $cl -like '*FimdiVPN*') {
+    Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+Start-Sleep -Milliseconds 500
+Get-NetAdapter -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -in @('fimdi-tun','singbox_tun') } |
+  Remove-NetAdapter -Force -Confirm:$false -ErrorAction SilentlyContinue
+"""
+        try:
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                capture_output=True, text=True, timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            _append_log("WARNING", f"Не удалось убрать старый TUN-адаптер: {exc}")
 
     def _start_singbox(self, tunnel: ObservableTunnel) -> None:
         binary = self._singbox_path()
@@ -991,6 +1128,10 @@ class Backend:
         if check.returncode != 0:
             raise RuntimeError(f"sing-box отклонил конфигурацию: {(check.stderr or check.stdout).strip()[:500]}")
 
+        # Keep polling traffic out of the TUN interface.  Specific host routes
+        # win over the default route that sing-box installs.
+        self._add_poll_routes()
+
         _append_log("INFO", "Запуск sing-box TUN (нужны права администратора)…")
         proc = subprocess.Popen(
             [str(binary), "run", "-c", str(path)],
@@ -1004,22 +1145,31 @@ class Backend:
         )
         self.singbox = proc
         threading.Thread(target=self._read_singbox_logs, args=(proc,), daemon=True).start()
-        time.sleep(1.8)
+        time.sleep(0.6)
         if proc.poll() is not None:
             raise RuntimeError(f"sing-box завершился: {self.singbox_error or 'неизвестная ошибка'}")
         _append_log("INFO", "sing-box TUN запущен")
 
+    @staticmethod
+    def _clean_ansi(text: str) -> str:
+        import re
+        return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text).strip()
+
     def _read_singbox_logs(self, proc: subprocess.Popen) -> None:
         try:
             assert proc.stdout is not None
-            for line in proc.stdout:
-                line = line.strip()
+            for raw in proc.stdout:
+                line = self._clean_ansi(raw)
                 if not line:
                     continue
                 low = line.lower()
-                level = "ERROR" if ("error" in low or "fatal" in low) else "INFO"
-                if level == "ERROR":
+                # Only a fatal error should be shown in the UI.  Routine
+                # per-connection errors (UDP/QUIC, DNS timeouts) are normal
+                # with a TCP-only SOCKS upstream and go to the log only.
+                fatal = "fatal" in low or "panic" in low
+                if fatal:
                     self.singbox_error = line
+                level = "ERROR" if fatal else ("WARNING" if "error" in low else "INFO")
                 _append_log(level, f"sing-box: {line}")
         except Exception:
             pass
@@ -1062,6 +1212,8 @@ class Backend:
                     self.singbox_cfg_path.unlink(missing_ok=True)
             except Exception:
                 pass
+            self._remove_poll_routes()
+            self._cleanup_stale_tun()
 
     # ── exit check ─────────────────────────────────────────────────────
 
@@ -1097,7 +1249,7 @@ class Backend:
         # routed directly by split routing.
         req = urllib.request.Request(
             "https://www.cloudflare.com/cdn-cgi/trace",
-            headers={"User-Agent": "fimdi-vpn/1.0"},
+            headers={"User-Agent": "short-polling-vpn/1.0"},
         )
         with opener.open(req, timeout=18) as resp:
             text = resp.read().decode("utf-8", "replace")
@@ -1220,17 +1372,19 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="FIMDI VPN desktop backend")
+    parser = argparse.ArgumentParser(description="Short Polling VPN desktop backend")
     parser.add_argument("--api-port", type=int, default=DEFAULT_API_PORT)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
-    _append_log("INFO", f"FIMDI VPN backend {VERSION} запущен (API 127.0.0.1:{args.api_port})")
+    _append_log("INFO", f"Short Polling VPN backend {VERSION} запущен (API 127.0.0.1:{args.api_port})")
     if not is_admin():
         _append_log("INFO", "Приложение запущено без прав администратора — TUN-режим будет недоступен")
 
     backend = Backend(args.api_port, verbose=args.verbose)
+    if is_admin():
+        backend._cleanup_stale_tun()
     backend.proxy.restore_stale()
 
     handler = type("BoundApiHandler", (ApiHandler,), {"backend": backend})

@@ -23,7 +23,7 @@ export function SetupPanel({ initialUrl, busy, onLoad }: SetupPanelProps) {
         </div>
         <h1 className="setup-title">Подключите свою подписку</h1>
         <p className="setup-text">
-          Вставьте ссылку, которую выдал FIMDI VPN. Приложение загрузит список узлов и профилей,
+          Вставьте ссылку, которую выдал Short Polling VPN. Приложение загрузит список узлов и профилей,
           выберите подходящий маршрут и включите системный прокси или полноценный VPN в режиме TUN.
         </p>
 

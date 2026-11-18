@@ -1,8 +1,8 @@
 {
-  "name": "fimdi-vpn-desktop",
+  "name": "short-polling-vpn-desktop",
   "version": "1.0.0",
   "private": true,
-  "description": "FIMDI VPN desktop client — subscription profiles, system proxy and TUN mode",
+  "description": "Short Polling VPN desktop client — subscription profiles, system proxy and TUN mode",
   "author": "FIMDI",
   "main": "electron/main.cjs",
   "scripts": {
@@ -31,8 +31,8 @@
     "wait-on": "^9.0.1"
   },
   "build": {
-    "appId": "ru.fimdi.vpn",
-    "productName": "FIMDI VPN",
+    "appId": "ru.fimdi.shortpollingvpn",
+    "productName": "Short Polling VPN",
     "directories": {
       "output": "release"
     },
@@ -57,10 +57,11 @@
       }
     ],
     "win": {
+      "icon": "assets/icon.ico",
       "target": [
         "portable"
       ],
-      "artifactName": "FIMDI-VPN-${version}-portable.${ext}"
+      "artifactName": "Short-Polling-VPN-${version}-portable.${ext}"
     }
   }
 }

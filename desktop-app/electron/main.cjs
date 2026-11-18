@@ -7,7 +7,7 @@ const fs = require("node:fs");
 
 const IS_DEV = process.argv.includes("--dev");
 const DEV_URL = "http://127.0.0.1:5173";
-const APP_ID = "ru.fimdi.vpn";
+const APP_ID = "ru.fimdi.shortpollingvpn";
 
 let mainWindow = null;
 let backendProcess = null;
@@ -33,7 +33,7 @@ function freePort() {
 function backendCommand() {
   if (!app.isPackaged) {
     const venv = path.join(app.getAppPath(), "..", ".venv", "Scripts", "python.exe");
-    const python = process.env.FIMDI_PYTHON || (fs.existsSync(venv) ? venv : "python");
+    const python = process.env.SPVPN_PYTHON || process.env.FIMDI_PYTHON || (fs.existsSync(venv) ? venv : "python");
     return {
       command: python,
       args: [path.join(app.getAppPath(), "backend", "vpn_backend.py"), "--api-port", String(backendPort)],
@@ -45,7 +45,7 @@ function backendCommand() {
     return { command: exe, args: ["--api-port", String(backendPort)], cwd: process.resourcesPath };
   }
   return {
-    command: process.env.FIMDI_PYTHON || "python",
+    command: process.env.SPVPN_PYTHON || process.env.FIMDI_PYTHON || "python",
     args: [path.join(process.resourcesPath, "backend", "vpn_backend.py"), "--api-port", String(backendPort)],
     cwd: process.resourcesPath,
   };
@@ -60,7 +60,7 @@ function startBackend() {
     VPN_CORE_DIR: app.isPackaged
       ? path.join(process.resourcesPath, "core")
       : path.join(app.getAppPath(), ".."),
-    FIMDI_SINGBOX: app.isPackaged
+    SPVPN_SINGBOX: app.isPackaged
       ? path.join(process.resourcesPath, "sing-box", "sing-box.exe")
       : path.join(app.getAppPath(), "resources", "sing-box", "sing-box.exe"),
   };
@@ -92,7 +92,7 @@ function startBackend() {
     if (!quitting && !shuttingDown && mainWindow && !mainWindow.isDestroyed()) {
       dialog.showMessageBox(mainWindow, {
         type: "error",
-        title: "FIMDI VPN",
+        title: "Short Polling VPN",
         message: "Служба VPN неожиданно остановилась",
         detail: `Код выхода: ${code ?? signal ?? "неизвестно"}. Перезапустите приложение.`,
         buttons: ["ОК"],
@@ -165,7 +165,7 @@ async function createWindow() {
     minHeight: 660,
     show: false,
     backgroundColor: "#07090f",
-    title: "FIMDI VPN",
+    title: "Short Polling VPN",
     titleBarStyle: "hidden",
     titleBarOverlay: {
       color: "#07090f",
@@ -221,14 +221,14 @@ ipcMain.handle("app:relaunchAdmin", async () => {
   const argList = args.length
     ? `-ArgumentList @(${args.map((a) => `'${String(a).replace(/'/g, "''")}'`).join(",")}) `
     : "";
-  const cmd = `Start-Process -FilePath '${process.execPath.replace(/'/g, "''")}' ${argList}-Verb RunAs`;
+  const cmd = `Start-Sleep -Milliseconds 1500; Start-Process -FilePath '${process.execPath.replace(/'/g, "''")}' ${argList}-Verb RunAs`;
   const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
   });
   child.unref();
-  setTimeout(() => app.quit(), 500);
+  setTimeout(() => app.quit(), 300);
   return { ok: true };
 });
 
@@ -257,7 +257,7 @@ if (!singleInstance) {
       startBackend();
       await waitForBackend();
     } catch (error) {
-      dialog.showErrorBox("FIMDI VPN", String(error.message || error));
+      dialog.showErrorBox("Short Polling VPN", String(error.message || error));
       app.quit();
       return;
     }

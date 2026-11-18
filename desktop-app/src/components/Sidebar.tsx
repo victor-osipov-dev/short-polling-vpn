@@ -47,7 +47,7 @@ export function Sidebar({ state, tab, onTab, onRefresh, busy }: SidebarProps) {
           <Power size={19} strokeWidth={2.6} />
         </div>
         <div className="brand-text">
-          <div className="brand-name">FIMDI VPN</div>
+          <div className="brand-name">Short Polling VPN</div>
           <div className="brand-sub">desktop</div>
         </div>
       </div>

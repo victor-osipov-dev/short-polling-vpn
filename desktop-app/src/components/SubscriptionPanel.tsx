@@ -32,7 +32,7 @@ export function SubscriptionPanel({ state, busy, onLoad, onRefresh, onGoProfiles
           <div>
             <div style={{ fontSize: 15, fontWeight: 800 }}>Ссылка подписки</div>
             <div style={{ fontSize: 12, color: "rgba(238,241,255,.45)" }}>
-              JSON с узлами, маршрутами и профилями приходит с сервера FIMDI.
+              JSON с узлами, маршрутами и профилями приходит с сервера Short Polling VPN.
             </div>
           </div>
         </div>

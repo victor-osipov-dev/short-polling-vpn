@@ -142,7 +142,7 @@ export default function App() {
       <div className="titlebar">
         <div className="titlebar-brand">
           <span className="titlebar-dot" />
-          FIMDI VPN
+          Short Polling VPN
         </div>
       </div>
 
