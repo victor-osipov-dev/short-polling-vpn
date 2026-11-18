@@ -53,7 +53,7 @@ scripts\build-backend.bat
 npm run dist
 ```
 
-`electron-builder` соберёт portable `.exe` в `release/`. В состав входят React-бандл, бэкенд (`vpn-backend.exe`), ядро `.py` и `sing-box`. Бинарники не хранятся в git, поэтому на чистом клоне сначала выполните два скрипта.
+`electron-builder` соберёт portable `.exe` в `release/`. Готовый релиз собирается одним скриптом `scripts\release.bat` (бэкенд + portable + ярлыки). Публикация на GitHub: `scripts\publish-release.ps1` (нужен сохранённый git-токен; скрипт сам создаст тег `v1.0.0`, релиз и загрузит `.exe`). В состав входят React-бандл, бэкенд (`vpn-backend.exe`), ядро `.py` и `sing-box`. Бинарники не хранятся в git, поэтому на чистом клоне сначала выполните `scripts\fetch-singbox.ps1`.
 
 ## Права администратора и TUN
 
