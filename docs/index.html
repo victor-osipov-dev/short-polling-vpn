@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Short Polling VPN — Android</title>
-<meta name="description" content="Android-клиент для short polling VPN: подписки, профили, тест соединения. Скачать APK.">
+<title>Short Polling VPN — Android и Windows</title>
+<meta name="description" content="Short Polling VPN — клиенты для Android и Windows: подписки, профили, тест соединения, системный прокси и TUN. Скачать APK и EXE.">
 <style>
   :root{
     --bg:#0b0f17; --card:#141a26; --card2:#1b2333; --text:#e8eefc; --muted:#93a1bd;
@@ -37,6 +37,8 @@
   .btn-primary:hover{transform:translateY(-1px);text-decoration:none}
   .btn-ghost{background:transparent;color:var(--text);border-color:var(--border)}
   .btn-ghost:hover{background:var(--card2);text-decoration:none}
+  .btn-desktop{background:linear-gradient(135deg,#1f9d7c,#22d3a6);color:#06241c;box-shadow:0 10px 26px rgba(34,211,166,.22)}
+  .btn-desktop:hover{transform:translateY(-1px);text-decoration:none}
   .meta{color:var(--muted); font-size:13.5px; text-align:center}
   .meta code{background:var(--card2);padding:2px 6px;border-radius:6px;color:var(--text)}
   section{margin-top:36px}
@@ -50,9 +52,12 @@
   .badge{display:inline-block;font-size:11.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
     padding:3px 8px;border-radius:999px;background:rgba(34,211,166,.14);color:var(--accent2);margin-left:8px;vertical-align:1px}
   .badge.pre{background:rgba(255,196,0,.14);color:#ffc400}
+  .badge.desktop{background:rgba(79,140,255,.16);color:#9dc0ff}
   .apk{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border-radius:10px;
     background:var(--card2);border:1px solid var(--border);font-weight:600;white-space:nowrap;text-decoration:none}
   .apk:hover{border-color:var(--accent);text-decoration:none}
+  .apk.desktop{border-color:#2f6a58;color:#baf5e4}
+  .apk.desktop:hover{border-color:var(--accent2)}
   .apk small{color:var(--muted);font-weight:400}
   ol{padding-left:22px;margin:0}
   ol li{margin:8px 0}
@@ -73,14 +78,18 @@
   <header>
     <div class="logo">🛡️</div>
     <h1>Short Polling VPN</h1>
-    <p class="sub">Android-клиент для туннеля на short polling: несколько подписок, профили, тест соединения и QR-импорт.</p>
+    <p class="sub">Клиенты Short Polling VPN для Android и Windows: подписки, профили, тест соединения, системный прокси и настоящий TUN-режим.</p>
     <div class="cta">
-      <a id="download" class="btn btn-primary" href="https://github.com/victor-osipov-dev/short-polling-vpn/releases/latest">
+      <a id="download-apk" class="btn btn-primary" href="https://github.com/victor-osipov-dev/short-polling-vpn/releases">
         ⬇ Скачать APK
+      </a>
+      <a id="download-desktop" class="btn btn-desktop" href="https://github.com/victor-osipov-dev/short-polling-vpn/releases">
+        💻 Скачать для Windows
       </a>
       <a class="btn btn-ghost" href="https://github.com/victor-osipov-dev/short-polling-vpn">Исходники на GitHub</a>
     </div>
-    <p class="meta" id="latest-meta">Последняя версия · Android 7.0+</p>
+    <p class="meta" id="latest-meta">Загрузка версий…</p>
+    <p class="meta" id="latest-desktop-meta"></p>
   </header>
 
   <section>
@@ -108,6 +117,8 @@
       <div class="feat"><b>Профили</b><span>Список подключений по подпискам, тест одного профиля или сразу всех.</span></div>
       <div class="feat"><b>QR-импорт</b><span>Сканер работает в портретном режиме и наводится на код подписки.</span></div>
       <div class="feat"><b>Проверка соединения</b><span>Перед подключением проверяются узлы и доступность маршрута.</span></div>
+      <div class="feat"><b>Windows-клиент</b><span>Portable-сборка с загрузкой подписки, выбором профиля и журналом событий.</span></div>
+      <div class="feat"><b>Прокси и TUN</b><span>Системный прокси с восстановлением настроек и VPN-адаптер через sing-box.</span></div>
     </div>
   </section>
 
@@ -118,6 +129,7 @@
 
 <script>
 const REPO = 'victor-osipov-dev/short-polling-vpn';
+const RELEASES_URL = `https://github.com/${REPO}/releases`;
 document.getElementById('year').textContent = new Date().getFullYear();
 
 function fmtSize(bytes){
@@ -131,42 +143,102 @@ function fmtDate(iso){
 function esc(s){
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+function asset(release, ext){
+  return (release.assets || []).find(a => a.name.toLowerCase().endsWith(ext));
+}
+function versionParts(release){
+  return String(release.tag_name || '')
+    .replace(/^v/i, '')
+    .split(/[.\-]/)
+    .map(part => parseInt(part, 10) || 0);
+}
+function compareReleases(a, b){
+  const av = versionParts(a), bv = versionParts(b);
+  for(let i = 0; i < Math.max(av.length, bv.length); i++){
+    const x = av[i] || 0, y = bv[i] || 0;
+    if(x !== y) return y - x;
+  }
+  const ad = new Date(a.published_at || a.created_at).getTime();
+  const bd = new Date(b.published_at || b.created_at).getTime();
+  return bd - ad;
+}
+function latestWith(ext, stableOnly = true){
+  const list = (stableOnly ? releases.filter(r => !r.draft && !r.prerelease) : releases)
+    .filter(r => asset(r, ext));
+  return list.sort(compareReleases)[0] || null;
+}
+function setMeta(id, label, release, ext){
+  const el = document.getElementById(id);
+  if(!release){
+    el.textContent = `${label}: релизов пока нет`;
+    return;
+  }
+  const a = asset(release, ext);
+  el.innerHTML = `${label}: <code>${esc(release.tag_name)}</code> · ${fmtDate(release.published_at)} · ${ext === '.apk' ? 'APK' : 'EXE'} ${fmtSize(a.size)}`;
+}
+function setButton(id, release, ext, label){
+  const btn = document.getElementById(id);
+  const a = release && asset(release, ext);
+  if(a){
+    btn.href = a.browser_download_url;
+    btn.textContent = label;
+    btn.style.opacity = '1';
+  } else {
+    btn.href = RELEASES_URL;
+    btn.textContent = `${label} — пока нет`;
+    btn.style.opacity = '.55';
+  }
+}
+
+let releases = [];
 
 async function load(){
   const box = document.getElementById('releases');
   try{
-    const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=20`, {headers:{Accept:'application/vnd.github+json'}});
+    const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=30`, {
+      headers:{Accept:'application/vnd.github+json'}
+    });
     if(!res.ok) throw new Error('HTTP ' + res.status);
-    const releases = await res.json();
+    releases = await res.json();
     if(!releases.length){
-      box.innerHTML = `<div class="card">Релизов пока нет. <a href="https://github.com/${REPO}/releases">Открыть страницу релизов</a>.</div>`;
+      box.innerHTML = `<div class="card">Релизов пока нет. <a href="${RELEASES_URL}">Открыть страницу релизов</a>.</div>`;
       return;
     }
-    const latest = releases.find(r => !r.draft && !r.prerelease) || releases[0];
-    const latestApk = (latest.assets || []).find(a => a.name.toLowerCase().endsWith('.apk'));
-    if(latestApk){
-      const btn = document.getElementById('download');
-      btn.href = latestApk.browser_download_url;
-      document.getElementById('latest-meta').innerHTML =
-        `Последняя версия <code>${esc(latest.tag_name)}</code> · ${fmtDate(latest.published_at)} · APK ${fmtSize(latestApk.size)}`;
-    }
-    box.innerHTML = releases.map(r => {
-      const apk = (r.assets || []).find(a => a.name.toLowerCase().endsWith('.apk'));
-      const badge = r.prerelease ? '<span class="badge pre">beta</span>' : (r === latest ? '<span class="badge">latest</span>' : '');
-      const link = apk
-        ? `<a class="apk" href="${apk.browser_download_url}">⬇ APK <small>${fmtSize(apk.size)}</small></a>`
-        : `<a class="apk" href="${r.html_url}">Открыть релиз</a>`;
+
+    // GitHub API order (and the "latest" flag) can be misleading after
+    // editing releases. Pick the newest semantic version per platform.
+    const apkRelease = latestWith('.apk');
+    const exeRelease = latestWith('.exe');
+
+    setMeta('latest-meta', 'Android', apkRelease, '.apk');
+    setMeta('latest-desktop-meta', 'Windows', exeRelease, '.exe');
+    setButton('download-apk', apkRelease, '.apk', '⬇ Скачать APK');
+    setButton('download-desktop', exeRelease, '.exe', '💻 Скачать для Windows');
+
+    box.innerHTML = [...releases].sort(compareReleases).map(r => {
+      const apk = asset(r, '.apk');
+      const exe = asset(r, '.exe');
+      const badges = [];
+      if(r.prerelease) badges.push('<span class="badge pre">beta</span>');
+      if(r === apkRelease) badges.push('<span class="badge">Android latest</span>');
+      if(r === exeRelease) badges.push('<span class="badge desktop">Windows latest</span>');
+
+      const links = [];
+      if(apk) links.push(`<a class="apk" href="${esc(apk.browser_download_url)}">⬇ APK <small>${fmtSize(apk.size)}</small></a>`);
+      if(exe) links.push(`<a class="apk desktop" href="${esc(exe.browser_download_url)}">⬇ EXE <small>${fmtSize(exe.size)}</small></a>`);
+      if(!links.length) links.push(`<a class="apk" href="${esc(r.html_url)}">Открыть релиз</a>`);
+
       return `<div class="release">
         <div>
-          <p class="r-title">${esc(r.name || r.tag_name)}${badge}</p>
+          <p class="r-title">${esc(r.name || r.tag_name)}${badges.join('')}</p>
           <p class="r-date">${esc(r.tag_name)} · ${fmtDate(r.published_at)}</p>
         </div>
-        ${link}
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${links.join('')}</div>
       </div>`;
     }).join('');
   } catch(e){
     box.innerHTML = `<div class="card">Не удалось загрузить список релизов (${esc(e.message)}).
-      <a href="https://github.com/${REPO}/releases">Открыть релизы на GitHub</a>.</div>`;
+      <a href="${RELEASES_URL}">Открыть релизы на GitHub</a>.</div>`;
   }
 }
 load();
