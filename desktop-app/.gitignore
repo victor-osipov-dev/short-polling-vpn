@@ -1,0 +1,8 @@
+node_modules
+dist
+release
+.pybuild
+resources/sing-box/*.exe
+resources/sing-box/*.dll
+resources/backend/*.exe
+*.log
