@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0.."
 python -m PyInstaller --onefile --clean --noconfirm ^
   --name vpn-backend ^
-  --distpath resources\backend ^
+  --distpath backend ^
   --workpath .pybuild ^
   --specpath .pybuild ^
   --paths .. ^

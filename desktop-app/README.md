@@ -20,6 +20,7 @@ desktop-app/
   electron/preload.cjs       contextBridge API для рендерера
   src/                       React UI
   backend/vpn_backend.py     JSON API, туннель, прокси, sing-box supervisor
+  backend/vpn-backend.exe    Собранный бэкенд (создаётся scripts\build-backend.bat)
   resources/sing-box/        Бандл sing-box 1.14.3 (exe + libcronet.dll)
   scripts/build-backend.bat  Сборка vpn-backend.exe через PyInstaller
 ```
