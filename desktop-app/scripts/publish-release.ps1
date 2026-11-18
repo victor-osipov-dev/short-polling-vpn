@@ -67,6 +67,17 @@ try {
   $release = Invoke-RestMethod -Uri "$api/releases" -Headers $headers -Method Post -Body $body
 }
 
+# Make sure the release tag points at the code we are publishing.
+$headSha = (git rev-parse HEAD).Trim()
+try {
+  $refUri = "$api/git/refs/tags/$tag"
+  $null = Invoke-RestMethod -Uri $refUri -Headers $headers -Method Get
+  $refBody = @{ sha = $headSha; force = $true } | ConvertTo-Json
+  $null = Invoke-RestMethod -Uri $refUri -Headers $headers -Method Patch -Body $refBody
+} catch {
+  # Fresh release: GitHub already created the tag from the default branch.
+}
+
 $assets = Invoke-RestMethod -Uri "$api/releases/$($release.id)/assets" -Headers $headers -Method Get
 foreach ($asset in $assets) {
   if ($asset.name -eq $exeName) {
