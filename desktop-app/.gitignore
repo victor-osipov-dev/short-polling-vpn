@@ -1,6 +1,7 @@
 node_modules
 dist
 release
+release-next
 .pybuild
 resources/sing-box/*.exe
 resources/sing-box/*.dll
