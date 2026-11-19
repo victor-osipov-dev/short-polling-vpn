@@ -283,6 +283,11 @@ impl Router {
         }
     }
 
+    /// Node id behind an entry URL, if the subscription defines one.
+    pub fn node_name(&self, url: &str) -> Option<String> {
+        self.url_nodes.get(url).cloned()
+    }
+
     pub fn route_for(&self, host: &str, available: &HashSet<String>) -> Decision {
         if !self.split.enabled {
             return match self.pick_any(available, "global") {
@@ -669,6 +674,28 @@ mod tests {
         // the longest valid prefix (one hop) instead of failing the route.
         match router.route_for("example.com", &available) {
             Decision::Tunnel { chain, .. } => assert!(chain.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_hop_route_reports_node_name() {
+        let split = split(&[("non_ru", "DE")]);
+        let urls: Vec<String> = nodes().iter().map(|n| n.url.clone()).collect();
+        let router = Router::new(
+            split,
+            Ruleset::load(Path::new("__missing__"), &SplitConfig::default()),
+            nodes(),
+            routes(),
+            urls.clone(),
+            "round",
+        );
+        let available: HashSet<String> = urls.into_iter().collect();
+        match router.route_for("example.com", &available) {
+            Decision::Tunnel { entry, chain, .. } => {
+                assert!(chain.is_empty());
+                assert_eq!(router.node_name(&entry).as_deref(), Some("de"));
+            }
             other => panic!("unexpected {other:?}"),
         }
     }

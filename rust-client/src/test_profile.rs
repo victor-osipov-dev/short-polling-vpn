@@ -73,7 +73,15 @@ pub async fn test_profile(
         if let Some(host) = url.host_str() {
             let decision = tunnel.route(host);
             result.category = decision.category().as_str().to_owned();
-            result.route = describe(decision);
+            // A single-hop route has no chain; show the node id instead of
+            // the raw entry URL.
+            let single = match &decision {
+                Decision::Tunnel { entry, chain, .. } if chain.is_empty() => {
+                    tunnel.router.node_name(entry)
+                }
+                _ => None,
+            };
+            result.route = single.unwrap_or_else(|| describe(decision));
         }
     }
 
