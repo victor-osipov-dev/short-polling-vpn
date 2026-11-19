@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -34,6 +34,14 @@ struct Ui {
 }
 
 pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
+    let store = Store::load(&dir)?;
+    // Fresh install: keep the window open and explain how to add a profile
+    // instead of exiting on the first error.
+    if profile.is_none() && store.profiles.is_empty() && store.settings.server_urls.is_empty() {
+        if !onboarding(&dir)? {
+            return Ok(());
+        }
+    }
     let store = Store::load(&dir)?;
     let selected = match profile.as_deref() {
         Some(needle) if needle != MANUAL_PROFILE_ID => Some(
@@ -96,6 +104,100 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
     handle.stop().await;
     control::clear_state(&dir);
     result
+}
+
+/// First-run screen: shown when there are no subscriptions yet, so the
+/// dashboard (or a double-clicked window) stays open instead of closing.
+fn onboarding(dir: &Path) -> Result<bool> {
+    let mut terminal = ratatui::init();
+    let outcome = (|| -> Result<bool> {
+        loop {
+            terminal.draw(|frame| draw_onboarding(frame, dir))?;
+            if !event::poll(Duration::from_millis(250))? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(false),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(false)
+                }
+                KeyCode::Char('r') => {
+                    let store = Store::load(dir)?;
+                    if !store.profiles.is_empty() || !store.settings.server_urls.is_empty() {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+    })();
+    ratatui::restore();
+    outcome
+}
+
+fn draw_onboarding(frame: &mut Frame, dir: &Path) {
+    let area = frame.area();
+    let lines = vec![
+        Line::from(Span::styled(
+            "Short Polling VPN",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from("No profiles yet. Add a subscription in a terminal:"),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  spvpn subs add \"https://<host>/sub/<token>\" --name main",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            "  spvpn profiles",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(Span::styled("  spvpn", Style::default().fg(Color::Yellow))),
+        Line::raw(""),
+        Line::from("Config directory:"),
+        Line::from(Span::styled(
+            format!("  {}", dir.display()),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::raw(""),
+        Line::from("Manual mode (no subscription):"),
+        Line::from(Span::styled(
+            "  spvpn config set urls \"https://edge1.example.com,https://edge2.example.com\"",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            "  spvpn config set psk \"<base64 PSK>\"",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("r", Style::default().fg(Color::Green)),
+            Span::raw(" reload   "),
+            Span::styled("q", Style::default().fg(Color::Green)),
+            Span::raw(" quit"),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Welcome ")
+                    .title_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 async fn event_loop(
@@ -532,6 +634,25 @@ mod tests {
         assert!(screen.contains("tunnel ready"), "{screen}");
         assert!(screen.contains("poll failed"), "{screen}");
         assert!(!screen.contains("Servers (2)"), "{screen}");
+    }
+
+    #[test]
+    fn onboarding_explains_first_run() {
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal
+            .draw(|frame| draw_onboarding(frame, Path::new("C:/config")))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("No profiles yet"), "{screen}");
+        assert!(screen.contains("spvpn subs add"), "{screen}");
+        assert!(screen.contains("C:/config"), "{screen}");
+        assert!(screen.contains("reload"), "{screen}");
     }
 
     #[test]
