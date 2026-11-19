@@ -130,7 +130,12 @@ async def handle_socks_client(
     try:
         cmd, host, port = await socks5_handshake(reader, writer)
     except Exception as e:
-        logger.error("socks handshake failed from %s: %s", peer, e)
+        # Браузеры и сканеры часто открывают SOCKS-порт и сразу закрывают
+        # соединение — это не ошибка туннеля, не пугаем пользователя.
+        if isinstance(e, (asyncio.IncompleteReadError, ConnectionError)):
+            logger.debug("socks handshake closed by %s: %s", peer, e)
+        else:
+            logger.warning("socks handshake failed from %s: %s", peer, e)
         writer.close()
         return
 

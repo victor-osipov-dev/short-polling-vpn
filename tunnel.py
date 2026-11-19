@@ -97,6 +97,8 @@ class ClientTunnel:
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
         self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
         self.pad_polls = bool(client_cfg.get("pad_polls", True))
+        self.poll_retry = max(0, int(client_cfg.get("poll_retry", 2)))
+        self.poll_timeout_s = float(client_cfg.get("poll_timeout_s", 8.0))
         self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
         self.poll_method = client_cfg.get("poll_method", "POST").upper()
         self.poll_data_in = client_cfg.get("poll_data_in", "body")
@@ -135,7 +137,7 @@ class ClientTunnel:
         # задерживать poll-цикл (read timeout длинный для long-poll).
         self.http = httpx.AsyncClient(
             http2=True, verify=verify_tls, trust_env=trust_env,
-            timeout=httpx.Timeout(15.0, connect=4.0))
+            timeout=httpx.Timeout(self.poll_timeout_s, connect=min(4.0, self.poll_timeout_s)))
         self._stop = False
 
         # Смещение времени своё для каждого URL: часы серверов могут
@@ -160,6 +162,8 @@ class ClientTunnel:
         self._dns_task = None
         self._poll_count = 0
         self._health_inflight: set[str] = set()
+        self._inflight: dict = {}
+        self._deferred: dict = {}
 
         logger.info("client_id=%s", self.client_id.hex())
 
@@ -195,6 +199,8 @@ class ClientTunnel:
         self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
         self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
         self.pad_polls = bool(client_cfg.get("pad_polls", True))
+        self.poll_retry = max(0, int(client_cfg.get("poll_retry", 2)))
+        self.poll_timeout_s = float(client_cfg.get("poll_timeout_s", 8.0))
         self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
         self.poll_method = client_cfg.get("poll_method", "POST").upper()
         self.poll_data_in = client_cfg.get("poll_data_in", "body")
@@ -466,13 +472,33 @@ class ClientTunnel:
         if not groups:
             return
 
-        results = await asyncio.gather(
-            *(self._poll_base(base, frames, route) for (base, route), frames in groups.items()),
-            return_exceptions=True,
-        )
-        for r in results:
-            if isinstance(r, Exception):
-                logger.error("poll task error: %s", r)
+        for key, frames in groups.items():
+            self._schedule_poll(key, frames)
+
+    def _schedule_poll(self, key, frames) -> None:
+        """Запускает полл для узла, не блокируя остальные узлы.
+
+        Раньше все поллы ждались через gather: один зависший узел
+        останавливал трафик остальных на весь read timeout.
+        """
+        if key in self._inflight:
+            # Узел уже опрашивается: отдадим кадры следующим запросом,
+            # чтобы не нарушить порядок данных в сессии.
+            self._deferred.setdefault(key, []).extend(frames)
+            return
+        self._inflight[key] = asyncio.create_task(self._run_poll(key, frames))
+
+    async def _run_poll(self, key, frames) -> None:
+        base, route = key
+        try:
+            await self._poll_base(base, frames, route)
+        except Exception as exc:
+            logger.error("poll task error: %s", exc)
+        finally:
+            self._inflight.pop(key, None)
+            pending = self._deferred.pop(key, None)
+            if pending:
+                self._schedule_poll(key, pending)
 
     async def _health_probe(self, url_base: str) -> None:
         """Фоновая проверка неиспользуемого URL: карантин и выбор маршрута
@@ -486,7 +512,8 @@ class ClientTunnel:
 
     async def _poll_base(self, url_base: str, frames_to_send,
                          route: tuple[str, ...] = (),
-                         timeout: float | None = None) -> None:
+                         timeout: float | None = None,
+                         attempt: int = 0) -> None:
         """Один poll-запрос к конкретному входному URL."""
         if self.pad_polls:
             frames_to_send = pad_frames(frames_to_send)
@@ -547,7 +574,7 @@ class ClientTunnel:
                     # вызывался ещё и в except после raise_for_status().
                     self._mark_failure(url_base)
                     logger.error("poll HTTP %s from %s", resp.status_code, url_base)
-                    await self._handle_base_failure(url_base, f"HTTP {resp.status_code}", bool(frames_to_send))
+                    await self._handle_base_failure(url_base, f"HTTP {resp.status_code}", frames_to_send)
                     return
                 ctype = resp.headers.get("Content-Type", "").lower()
                 if "octet-stream" not in ctype:
@@ -557,22 +584,58 @@ class ClientTunnel:
                     logger.warning("unexpected response from %s (%s); check user/device/route",
                                    url_base, ctype or "no content-type")
                     await self._handle_base_failure(url_base, "unexpected content-type",
-                                                    bool(frames_to_send))
+                                                    frames_to_send)
                     return
                 self._mark_success(url_base)
                 await self._handle_stream_response(resp)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            # Соединение не установилось: данные до сервера не дошли, поэтому
+            # повтор безопасен (без дублей) и не рвёт живые сессии.
+            if attempt < self.poll_retry and frames_to_send:
+                await asyncio.sleep(0.15 * (attempt + 1))
+                return await self._poll_base(url_base, frames_to_send, route,
+                                             timeout, attempt + 1)
+            self._mark_failure(url_base)
+            logger.error("poll connect failed (%s): %s", url_base, e)
+            await self._handle_base_failure(url_base, str(e), frames_to_send)
         except Exception as e:
             self._mark_failure(url_base)
             if "403" not in str(e):
                 logger.error("poll request failed (%s): %s", url_base, e)
-            await self._handle_base_failure(url_base, str(e), bool(frames_to_send))
+            await self._handle_base_failure(url_base, str(e), frames_to_send)
 
-    async def _handle_base_failure(self, url_base: str, reason: str, had_frames: bool) -> None:
-        """Закрывает сессии, закреплённые за упавшим URL, если в запросе
-        были их данные или URL уже ушёл в карантин."""
-        quarantined = self._url_cooldown_until.get(url_base, 0) > time.time()
-        if had_frames or quarantined:
+    async def _handle_base_failure(self, url_base: str, reason: str, frames) -> None:
+        """Закрывает только те сессии, чьи данные потерялись в этом запросе.
+
+        Раньше здесь закрывались ВСЕ сессии, привязанные к URL: один таймаут
+        убивал и чужие долгоживущие соединения (SSE, загрузки), и приложение
+        видело ECONNRESET.
+        """
+        if self._url_cooldown_until.get(url_base, 0) > time.time():
+            # Узел в карантине — сессии на нём всё равно нерабочие.
             await self._fail_base_sessions(url_base, reason)
+            return
+        affected = {f.session_id for f in frames
+                    if (f.flags & (FLAG_NEW | FLAG_DATA | FLAG_FIN))}
+        if affected:
+            await self._fail_sessions(affected, url_base, reason)
+
+    async def _fail_sessions(self, sids, url_base: str, reason: str) -> None:
+        closed = 0
+        async with self.lock:
+            for sid in list(sids):
+                sess = self.sessions.pop(sid, None)
+                if sess is None:
+                    continue
+                closed += 1
+                self._fin_outbox.append((sess.server_base, sid))
+                try:
+                    sess.writer.close()
+                except Exception:
+                    pass
+        if closed:
+            logger.warning("closed %d session(s) with lost data on %s (%s)",
+                           closed, url_base, reason)
 
     async def _fail_base_sessions(self, url_base: str, reason: str) -> None:
         closed = 0
@@ -692,6 +755,8 @@ class ClientTunnel:
 
     async def stop(self):
         self._stop = True
+        for task in list(self._inflight.values()):
+            task.cancel()
         if self._sub_task:
             self._sub_task.cancel()
         if self._dns_task:

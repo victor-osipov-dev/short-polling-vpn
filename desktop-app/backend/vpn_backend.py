@@ -696,6 +696,8 @@ class Backend:
         client["server_selector"] = "random"
         client.setdefault("poll_interval_ms", 200)
         client.setdefault("poll_jitter_ms", 5)
+        client.setdefault("poll_retry", 2)
+        client.setdefault("poll_timeout_s", 8)
         idle = client.setdefault("idle_timeout", {})
         idle["enabled"] = False
 
@@ -970,6 +972,21 @@ class Backend:
                 continue
         return sorted(addresses)
 
+    def _direct_processes(self) -> list[str]:
+        """Процессы, которым TUN не нужен (иначе их долгие соединения
+        рвутся при сбое полл-туннеля). Дополняется из settings.json."""
+        names = ["python.exe", "pythonw.exe", "vpn-backend.exe",
+                 "OpenCode.exe", "opencode-cli.exe"]
+        try:
+            extra = load_settings().get("directProcesses") or []
+        except Exception:
+            extra = []
+        for name in extra:
+            name = str(name).strip()
+            if name and name.lower() not in {n.lower() for n in names}:
+                names.append(name)
+        return names
+
     def _tun_config(self) -> dict:
         excluded = self._resolve_node_ips()
         config = {
@@ -1002,14 +1019,14 @@ class Backend:
                     "server_port": SOCKS_PORT,
                     "version": "5",
                 },
-                {"type": "direct", "tag": "direct", "domain_resolver": "proxy-dns"},
+                {"type": "direct", "tag": "direct", "domain_resolver": "local-dns"},
             ],
             "route": {
                 "rules": [
                     {"action": "sniff"},
                     {"protocol": "dns", "action": "hijack-dns"},
                     {"ip_is_private": True, "outbound": "direct"},
-                    {"process_name": ["python.exe", "pythonw.exe", "vpn-backend.exe"], "outbound": "direct"},
+                    {"process_name": self._direct_processes(), "outbound": "direct"},
                     # Our SOCKS5 upstream only supports TCP CONNECT. Reject
                     # other UDP flows (QUIC etc.) so apps fall back to TCP
                     # instead of asking sing-box for UDP ASSOCIATE.
