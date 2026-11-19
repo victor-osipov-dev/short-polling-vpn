@@ -52,6 +52,15 @@ pub async fn serve(bind: String, ctx: ControlCtx, running: Arc<AtomicBool>) -> R
     let listener = TcpListener::bind(&bind)
         .await
         .with_context(|| format!("cannot bind control listener on {bind}"))?;
+    serve_on(listener, &bind, ctx, running).await
+}
+
+pub async fn serve_on(
+    listener: TcpListener,
+    bind: &str,
+    ctx: ControlCtx,
+    running: Arc<AtomicBool>,
+) -> Result<()> {
     tracing::info!("control API on {bind}");
     while running.load(Ordering::Acquire) {
         let (stream, _) = match listener.accept().await {

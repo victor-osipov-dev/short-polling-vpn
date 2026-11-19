@@ -60,11 +60,12 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
     let tunnel = Tunnel::new(resolved, &dir.join("cache")).await?;
     let handle = tunnel.start();
 
-    let listener = TcpListener::bind(&socks)
-        .await
-        .with_context(|| format!("cannot bind SOCKS5 listener on {socks}"))?;
+    let listener = bind_socks(&socks).await?;
     let actual_socks = listener.local_addr()?.to_string();
     let socks_task = tokio::spawn(crate::socks::serve_listener(listener, tunnel.clone()));
+
+    let control_listener = bind_addr(&control_addr, "control").await?;
+    let actual_control = control_listener.local_addr()?.to_string();
 
     let running = Arc::new(AtomicBool::new(true));
     let shutdown = Arc::new(Notify::new());
@@ -76,10 +77,10 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
             shutdown: shutdown.clone(),
             stopping: stopping.clone(),
         };
-        let addr = control_addr.clone();
+        let label = actual_control.clone();
         let flag = running.clone();
         tokio::spawn(async move {
-            if let Err(err) = control::serve(addr, ctx, flag).await {
+            if let Err(err) = control::serve_on(control_listener, &label, ctx, flag).await {
                 tracing::error!("control API: {err:#}");
             }
         })
@@ -88,14 +89,14 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
     let state = StateFile {
         pid: std::process::id(),
         socks: actual_socks.clone(),
-        control: control_addr.clone(),
+        control: actual_control.clone(),
         profile: tunnel.profile_name.clone(),
         started_at: crate::subscription::now_secs(),
     };
     control::write_state(&dir, &state)?;
 
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &dir, &tunnel, &actual_socks, &control_addr).await;
+    let result = event_loop(&mut terminal, &dir, &tunnel, &actual_socks, &actual_control).await;
     ratatui::restore();
 
     running.store(false, Ordering::Release);
@@ -198,6 +199,38 @@ fn draw_onboarding(frame: &mut Frame, dir: &Path) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// Binds the SOCKS5 listener, stepping to the next free port when the
+/// preferred one is taken (e.g. by the desktop app on 8890).
+async fn bind_socks(addr: &str) -> Result<TcpListener> {
+    bind_addr(addr, "SOCKS5").await
+}
+
+async fn bind_addr(addr: &str, label: &str) -> Result<TcpListener> {
+    let parsed: std::net::SocketAddr = addr
+        .parse()
+        .with_context(|| format!("invalid {label} address {addr:?} (expected IP:port)"))?;
+    match TcpListener::bind(parsed).await {
+        Ok(listener) => return Ok(listener),
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            for offset in 1..=20u16 {
+                let Some(port) = parsed.port().checked_add(offset) else {
+                    break;
+                };
+                let candidate = std::net::SocketAddr::new(parsed.ip(), port);
+                if let Ok(listener) = TcpListener::bind(candidate).await {
+                    tracing::warn!("{addr} is busy, using {candidate} for {label}");
+                    return Ok(listener);
+                }
+            }
+            anyhow::bail!(
+                "{label} port {} is busy (is another VPN client running?)",
+                parsed.port()
+            )
+        }
+        Err(err) => Err(err).with_context(|| format!("cannot bind {label} listener on {addr}")),
+    }
 }
 
 async fn event_loop(

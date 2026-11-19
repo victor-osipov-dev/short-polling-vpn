@@ -214,6 +214,35 @@ async fn run(cli: Cli, dir: PathBuf) -> Result<()> {
     }
 }
 
+/// Binds a listener, moving to the next free port when the preferred one is
+/// already taken (the desktop app keeps 8890/8891 while it is running).
+async fn bind_listener(addr: &str, label: &str) -> Result<TcpListener> {
+    let parsed: std::net::SocketAddr = addr
+        .parse()
+        .with_context(|| format!("invalid {label} address {addr:?} (expected IP:port)"))?;
+    match TcpListener::bind(parsed).await {
+        Ok(listener) => return Ok(listener),
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+            for offset in 1..=20u16 {
+                let Some(port) = parsed.port().checked_add(offset) else {
+                    break;
+                };
+                let candidate = std::net::SocketAddr::new(parsed.ip(), port);
+                if let Ok(listener) = TcpListener::bind(candidate).await {
+                    return Ok(listener);
+                }
+            }
+            anyhow::bail!(
+                "{label} port {} is busy (is another VPN client running?)",
+                parsed.port()
+            )
+        }
+        Err(err) => {
+            Err(err).with_context(|| format!("cannot bind {label} listener on {addr}"))
+        }
+    }
+}
+
 async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()> {
     let store = Store::load(dir)?;
     let profile = match args.profile.as_deref() {
@@ -239,13 +268,19 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
 
     let tunnel = Tunnel::new(resolved, &dir.join("cache")).await?;
     let running = Arc::new(AtomicBool::new(true));
-    let socks_listener = TcpListener::bind(&socks)
-        .await
-        .with_context(|| format!("cannot bind SOCKS5 listener on {socks}"))?;
+    let socks_listener = bind_listener(&socks, "SOCKS5").await?;
     let actual_socks = socks_listener.local_addr()?.to_string();
+    if actual_socks != socks {
+        tracing::warn!("{socks} is busy, using {actual_socks} for SOCKS5");
+    }
 
     let shutdown = Arc::new(Notify::new());
     let stopping = Arc::new(AtomicBool::new(false));
+    let control_listener = bind_listener(&control_addr, "control").await?;
+    let actual_control = control_listener.local_addr()?.to_string();
+    if actual_control != control_addr {
+        tracing::warn!("{control_addr} is busy, using {actual_control} for control API");
+    }
     let handle = tunnel.start();
 
     let socks_task = tokio::spawn(spvpn::socks::serve_listener(socks_listener, tunnel.clone()));
@@ -257,9 +292,9 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
             stopping: stopping.clone(),
         };
         let control_running = running.clone();
-        let addr = control_addr.clone();
+        let label = actual_control.clone();
         tokio::spawn(async move {
-            if let Err(err) = control::serve(addr, ctx, control_running).await {
+            if let Err(err) = control::serve_on(control_listener, &label, ctx, control_running).await {
                 tracing::error!("control API: {err:#}");
             }
         })
@@ -268,7 +303,7 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
     let state = StateFile {
         pid: std::process::id(),
         socks: actual_socks.clone(),
-        control: control_addr.clone(),
+        control: actual_control.clone(),
         profile: tunnel.profile_name.clone(),
         started_at: spvpn::subscription::now_secs(),
     };
@@ -280,7 +315,7 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
         println!("Short Polling VPN {} — connected", spvpn::VERSION);
         println!("  profile : {}", tunnel.profile_name);
         println!("  SOCKS5  : {actual_socks}");
-        println!("  control : {control_addr}");
+        println!("  control : {actual_control}");
         println!("  press Ctrl+C to stop");
     }
 
