@@ -497,7 +497,7 @@ class ClientTunnel:
         finally:
             self._inflight.pop(key, None)
             pending = self._deferred.pop(key, None)
-            if pending:
+            if pending and not self._stop:
                 self._schedule_poll(key, pending)
 
     async def _health_probe(self, url_base: str) -> None:
