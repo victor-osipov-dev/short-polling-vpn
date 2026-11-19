@@ -159,6 +159,8 @@ pub struct Tunnel {
     urls: Vec<String>,
     poll_path: String,
     poll_interval: Duration,
+    poll_idle: Duration,
+    poll_min: Duration,
     poll_jitter_ms: u64,
     max_chunk: usize,
     max_frames: usize,
@@ -197,6 +199,8 @@ impl Tunnel {
             &settings.selector,
         );
         let poll_interval = Duration::from_millis(settings.poll_interval_ms.max(5));
+        let poll_idle = Duration::from_millis(settings.poll_idle_ms.max(5)).max(HEALTH_INTERVAL);
+        let poll_min = Duration::from_millis(settings.poll_min_ms.max(5));
         let idle_timeout = settings.idle_timeout_s.filter(|s| *s > 0).map(Duration::from_secs);
         let tunnel = Arc::new(Self {
             stats: Arc::new(Stats::new()),
@@ -209,6 +213,8 @@ impl Tunnel {
             urls: resolved.urls,
             poll_path: settings.poll_path.clone(),
             poll_interval,
+            poll_idle,
+            poll_min,
             poll_jitter_ms: settings.poll_jitter_ms,
             max_chunk: settings.max_chunk_bytes.max(1024),
             max_frames: settings.max_frames_per_poll.max(1),
@@ -501,8 +507,9 @@ impl Tunnel {
             let mut delay = if active {
                 self.poll_interval
             } else {
-                self.poll_interval.max(HEALTH_INTERVAL)
+                self.poll_idle
             };
+            delay = delay.max(self.poll_min);
             if self.poll_jitter_ms > 0 {
                 let jitter = rand::thread_rng()
                     .gen_range(0..=self.poll_jitter_ms.min(delay.as_millis() as u64 / 2 + 1));

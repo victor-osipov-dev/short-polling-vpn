@@ -39,7 +39,11 @@ client:
     bind_port: 8888
   server_url: "https://YOUR_SERVER_IP:8443"
   poll_path: "/poll"          # путь VPN-ручки (можно сменить для маскировки)
-  poll_interval_ms: 200
+  poll_interval_ms: 200        # активный режим: есть трафик
+  poll_idle_ms: 800            # простой: трафик был > poll_active_window_ms назад
+  poll_min_ms: 100             # нижняя граница: не чаще, чем раз в 100 мс (CDN)
+  poll_active_window_ms: 1500  # сколько мс после последнего пакета считаем активностью
+  poll_coalesce_ms: 10         # склейка NEW и первых данных в один полл
   poll_jitter_ms: 50
   poll_retry: 2                # повторы, если соединение не установилось (без дублей)
   poll_timeout_s: 8            # предел ожидания ответа на один полл

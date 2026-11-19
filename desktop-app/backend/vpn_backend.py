@@ -693,8 +693,14 @@ class Backend:
         client["dns_relay"] = {"enabled": False, "bind_host": "127.0.0.1", "bind_port": 5353}
         client["verify_tls"] = True
         client["trust_env_proxy"] = False
-        client["server_selector"] = "random"
-        client.setdefault("poll_interval_ms", 200)
+        client["server_selector"] = "fastest"
+        # Адаптивный polling: быстро при активности, редко в простое,
+        # но не чаще poll_min_ms (щадим CDN и лимиты).
+        client["poll_interval_ms"] = 100
+        client["poll_idle_ms"] = 800
+        client["poll_min_ms"] = 100
+        client["poll_active_window_ms"] = 1500
+        client["poll_coalesce_ms"] = 10
         client.setdefault("poll_jitter_ms", 5)
         client.setdefault("poll_retry", 2)
         client.setdefault("poll_timeout_s", 8)
@@ -987,16 +993,29 @@ class Backend:
                 names.append(name)
         return names
 
+    def _dns_mode(self) -> str:
+        """tunnel (DoH через туннель, приватно, но медленнее),
+        direct (DoH напрямую, шифрование без лишних RTT) или
+        local (обычный DNS провайдера, самый быстрый)."""
+        try:
+            mode = str(load_settings().get("dnsMode") or "tunnel").lower()
+        except Exception:
+            mode = "tunnel"
+        return mode if mode in ("tunnel", "direct", "local") else "tunnel"
+
     def _tun_config(self) -> dict:
         excluded = self._resolve_node_ips()
+        dns_mode = self._dns_mode()
         config = {
             "log": {"level": "warn", "timestamp": True},
             "dns": {
                 "servers": [
                     {"tag": "proxy-dns", "type": "https", "server": "1.1.1.1", "detour": "socks-out"},
+                    {"tag": "direct-dns", "type": "https", "server": "1.1.1.1", "detour": "direct"},
                     {"tag": "local-dns", "type": "udp", "server": "223.5.5.5", "detour": "direct"},
                 ],
-                "final": "proxy-dns",
+                "final": {"tunnel": "proxy-dns", "direct": "direct-dns",
+                          "local": "local-dns"}[dns_mode],
             },
             "inbounds": [
                 {
@@ -1034,7 +1053,7 @@ class Backend:
                 ],
                 "final": "socks-out",
                 "auto_detect_interface": True,
-                "default_domain_resolver": "proxy-dns",
+                "default_domain_resolver": "local-dns",
             },
         }
         return config

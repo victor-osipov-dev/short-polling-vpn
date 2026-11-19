@@ -94,8 +94,12 @@ class ClientTunnel:
         self.url_cooldown_seconds = max(1, int(client_cfg.get("url_cooldown_seconds", 60)))
         self._all_q_logged = False
         self.poll_path = client_cfg.get("poll_path", "/poll")
-        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
-        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
+        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 100))
+        self.poll_idle_ms = int(client_cfg.get("poll_idle_ms", 800))
+        self.poll_min_ms = int(client_cfg.get("poll_min_ms", 100))
+        self.poll_active_window_ms = int(client_cfg.get("poll_active_window_ms", 1500))
+        self.poll_coalesce_ms = int(client_cfg.get("poll_coalesce_ms", 10))
+        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 5))
         self.pad_polls = bool(client_cfg.get("pad_polls", True))
         self.poll_retry = max(0, int(client_cfg.get("poll_retry", 2)))
         self.poll_timeout_s = float(client_cfg.get("poll_timeout_s", 8.0))
@@ -162,8 +166,8 @@ class ClientTunnel:
         self._dns_task = None
         self._poll_count = 0
         self._health_inflight: set[str] = set()
-        self._inflight: dict = {}
-        self._deferred: dict = {}
+        self._url_rtt: dict = {}
+        self._wake = asyncio.Event()
 
         logger.info("client_id=%s", self.client_id.hex())
 
@@ -196,8 +200,12 @@ class ClientTunnel:
         self.url_cooldown_seconds = max(1, int(client_cfg.get("url_cooldown_seconds", 60)))
         self._all_q_logged = False
         self.poll_path = client_cfg.get("poll_path", "/poll")
-        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
-        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
+        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 100))
+        self.poll_idle_ms = int(client_cfg.get("poll_idle_ms", 800))
+        self.poll_min_ms = int(client_cfg.get("poll_min_ms", 100))
+        self.poll_active_window_ms = int(client_cfg.get("poll_active_window_ms", 1500))
+        self.poll_coalesce_ms = int(client_cfg.get("poll_coalesce_ms", 10))
+        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 5))
         self.pad_polls = bool(client_cfg.get("pad_polls", True))
         self.poll_retry = max(0, int(client_cfg.get("poll_retry", 2)))
         self.poll_timeout_s = float(client_cfg.get("poll_timeout_s", 8.0))
@@ -229,6 +237,7 @@ class ClientTunnel:
         async with self.lock:
             self.sessions[sid] = sess
         self._last_activity = time.monotonic()
+        self._wake.set()
         logger.debug("new session %s -> %s:%s", sid.hex()[:8], host, port)
         return sid
 
@@ -238,12 +247,14 @@ class ClientTunnel:
             if sess:
                 sess.outgoing.extend(data)
         self._last_activity = time.monotonic()
+        self._wake.set()
 
     async def mark_closed(self, sid: bytes):
         async with self.lock:
             sess = self.sessions.get(sid)
             if sess:
                 sess.closed = True
+        self._wake.set()
 
     # ── DNS relay ──
 
@@ -288,6 +299,7 @@ class ClientTunnel:
     async def _enqueue_dns_frame(self, frame: Frame):
         async with self.lock:
             self._dns_outbox.append(frame)
+        self._wake.set()
 
     def _prune_dns_pending(self):
         now = time.monotonic()
@@ -332,7 +344,12 @@ class ClientTunnel:
         pool = self._available_urls()
         if not pool:
             return ""
-        if len(pool) == 1 or self.server_selector == "random":
+        if len(pool) == 1:
+            return pool[0]
+        if self.server_selector == "fastest":
+            # Новое подключение — на узел с наименьшим измеренным RTT.
+            return min(pool, key=lambda u: self._url_rtt.get(u, 1e9))
+        if self.server_selector == "random":
             return random.choice(pool)
         base = pool[self._rr_index % len(pool)]
         self._rr_index += 1
@@ -404,11 +421,40 @@ class ClientTunnel:
                 await self._poll_once()
             except Exception as e:
                 logger.warning("poll error: %s", e)
-            jitter = random.randint(-self.poll_jitter_ms, self.poll_jitter_ms)
-            delay_ms = max(10, self.poll_interval_ms + jitter)
-            await asyncio.sleep(delay_ms / 1000)
+            await self._wait_poll(self._poll_delay_ms() / 1000)
+
+    def _poll_delay_ms(self) -> int:
+        """Адаптивный интервал: часто при активности, редко в простое.
+
+        Диапазон задаётся конфигом: poll_interval_ms (активно) …
+        poll_idle_ms (простой), но не чаще poll_min_ms.
+        """
+        active = bool(self.sessions) or any(
+            s.outgoing or s.pending_new is not None for s in self.sessions.values())
+        if not active:
+            idle_ms = (time.monotonic() - self._last_activity) * 1000.0
+            active = idle_ms < self.poll_active_window_ms
+        base = self.poll_interval_ms if active else self.poll_idle_ms
+        base = max(base, self.poll_min_ms)
+        jitter = random.randint(-self.poll_jitter_ms, self.poll_jitter_ms)
+        return max(10, base + jitter)
+
+    async def _wait_poll(self, delay: float) -> None:
+        """Ждёт новый трафик, но не дольше delay.
+
+        Без этого новый запрос после простоя ждал бы весь idle-интервал.
+        """
+        self._wake.clear()
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
 
     async def _poll_once(self):
+        # Склейка: дать первым данным (ClientHello) догнать кадр NEW и уйти
+        # одним поллом — экономит целый round-trip на подключении.
+        if any(s.pending_new is not None for s in self.sessions.values()):
+            await asyncio.sleep(self.poll_coalesce_ms / 1000)
         groups: dict[tuple[str, tuple[str, ...]], list] = defaultdict(list)
         async with self.lock:
             dead_sids = []
@@ -441,7 +487,10 @@ class ClientTunnel:
                 live_bases = sorted({sess.server_base or self.server_base
                                      for sess in self.sessions.values()})
                 for frame in self._dns_outbox:
-                    base = (random.choice(live_bases) if live_bases
+                    # Приоритет живому узлу с наименьшим RTT: DNS не должен
+                    # ждать самый медленный хоп.
+                    base = (min(live_bases, key=lambda u: self._url_rtt.get(u, 1e9))
+                            if live_bases
                             else self._pick_server_base() or self.server_base)
                     groups[(base, ())].append(frame)
                 self._dns_outbox = []
@@ -472,33 +521,13 @@ class ClientTunnel:
         if not groups:
             return
 
-        for key, frames in groups.items():
-            self._schedule_poll(key, frames)
-
-    def _schedule_poll(self, key, frames) -> None:
-        """Запускает полл для узла, не блокируя остальные узлы.
-
-        Раньше все поллы ждались через gather: один зависший узел
-        останавливал трафик остальных на весь read timeout.
-        """
-        if key in self._inflight:
-            # Узел уже опрашивается: отдадим кадры следующим запросом,
-            # чтобы не нарушить порядок данных в сессии.
-            self._deferred.setdefault(key, []).extend(frames)
-            return
-        self._inflight[key] = asyncio.create_task(self._run_poll(key, frames))
-
-    async def _run_poll(self, key, frames) -> None:
-        base, route = key
-        try:
-            await self._poll_base(base, frames, route)
-        except Exception as exc:
-            logger.error("poll task error: %s", exc)
-        finally:
-            self._inflight.pop(key, None)
-            pending = self._deferred.pop(key, None)
-            if pending and not self._stop:
-                self._schedule_poll(key, pending)
+        results = await asyncio.gather(
+            *(self._poll_base(base, frames, route) for (base, route), frames in groups.items()),
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error("poll task error: %s", r)
 
     async def _health_probe(self, url_base: str) -> None:
         """Фоновая проверка неиспользуемого URL: карантин и выбор маршрута
@@ -515,6 +544,7 @@ class ClientTunnel:
                          timeout: float | None = None,
                          attempt: int = 0) -> None:
         """Один poll-запрос к конкретному входному URL."""
+        started = time.monotonic()
         if self.pad_polls:
             frames_to_send = pad_frames(frames_to_send)
         batch = pack_frames(frames_to_send)
@@ -587,6 +617,10 @@ class ClientTunnel:
                                                     frames_to_send)
                     return
                 self._mark_success(url_base)
+                rtt_ms = (time.monotonic() - started) * 1000
+                prev = self._url_rtt.get(url_base)
+                self._url_rtt[url_base] = (rtt_ms if prev is None
+                                           else prev * 0.8 + rtt_ms * 0.2)
                 await self._handle_stream_response(resp)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
             # Соединение не установилось: данные до сервера не дошли, поэтому
@@ -755,8 +789,6 @@ class ClientTunnel:
 
     async def stop(self):
         self._stop = True
-        for task in list(self._inflight.values()):
-            task.cancel()
         if self._sub_task:
             self._sub_task.cancel()
         if self._dns_task:
