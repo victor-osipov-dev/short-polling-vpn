@@ -182,6 +182,9 @@ impl Store {
         if store.device_id.is_empty() {
             store.device_id = uuid::Uuid::new_v4().to_string();
         }
+        if store.migrate_profile_routes() {
+            let _ = store.save(dir);
+        }
         Ok(store)
     }
 
@@ -242,6 +245,45 @@ impl Store {
         self.subscriptions.len() != before
     }
 
+    /// Older configs lost the per-profile routes from the subscription, so
+    /// every profile silently fell back to the global non-RU route. Restore
+    /// them from `client_profiles` without touching local overrides.
+    fn migrate_profile_routes(&mut self) -> bool {
+        let mut changed = false;
+        for profile in &mut self.profiles {
+            if profile.route_ru.is_some()
+                && profile.route_non_ru.is_some()
+                && profile.route_private.is_some()
+            {
+                continue;
+            }
+            let Some(sub) = self.subscriptions.iter().find(|s| s.id == profile.sub_id) else {
+                continue;
+            };
+            let prefix = format!("{}::", sub.id);
+            let Some(def_id) = profile.id.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some(def) = client_profile_defs(&sub.raw)
+                .into_iter()
+                .find(|def| def.id == def_id)
+            else {
+                continue;
+            };
+            for (slot, value) in [
+                (&mut profile.route_ru, def.route_ru),
+                (&mut profile.route_non_ru, def.route_non_ru),
+                (&mut profile.route_private, def.route_private),
+            ] {
+                if slot.is_none() && !value.is_empty() {
+                    *slot = Some(value);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     /// Rebuilds profile rows from subscription `client_profiles`, keeping
     /// local routing overrides for profiles that still exist.
     pub fn sync_profiles(&mut self) {
@@ -274,15 +316,18 @@ impl Store {
                 }
                 let id = format!("{}::{}", sub.id, def.id);
                 let old = existing.get(&id);
+                let route_ru = (!def.route_ru.is_empty()).then_some(def.route_ru);
+                let route_non_ru = (!def.route_non_ru.is_empty()).then_some(def.route_non_ru);
+                let route_private = (!def.route_private.is_empty()).then_some(def.route_private);
                 profiles.push(Profile {
                     id,
                     sub_id: sub.id.clone(),
                     name: def.name,
                     mode: def.mode,
                     split: old.and_then(|p| p.split),
-                    route_ru: old.and_then(|p| p.route_ru.clone()),
-                    route_non_ru: old.and_then(|p| p.route_non_ru.clone()),
-                    route_private: old.and_then(|p| p.route_private.clone()),
+                    route_ru: old.and_then(|p| p.route_ru.clone()).or(route_ru),
+                    route_non_ru: old.and_then(|p| p.route_non_ru.clone()).or(route_non_ru),
+                    route_private: old.and_then(|p| p.route_private.clone()).or(route_private),
                 });
             }
         }
@@ -707,6 +752,50 @@ mod tests {
         assert_eq!(store.profiles.len(), 1);
         assert_eq!(store.profiles[0].name, "Split");
         assert_eq!(store.active.as_deref(), Some(store.profiles[0].id.as_str()));
+    }
+
+    #[test]
+    fn subscription_routes_seed_profiles() {
+        let mut raw = sample_subscription();
+        raw["client_profiles"][0]["route_ru"] = serde_json::json!("RU exit");
+        raw["client_profiles"][0]["route_non_ru"] = serde_json::json!("DE fallback");
+        let mut store = Store::default();
+        store.subscriptions.push(Subscription {
+            id: "s1".into(),
+            name: "test".into(),
+            source: "x".into(),
+            fetched_at: 0,
+            raw,
+        });
+        store.sync_profiles();
+        assert_eq!(store.profiles[0].route_ru.as_deref(), Some("RU exit"));
+        assert_eq!(store.profiles[0].route_non_ru.as_deref(), Some("DE fallback"));
+    }
+
+    #[test]
+    fn migration_restores_routes_for_existing_config() {
+        let mut raw = sample_subscription();
+        raw["client_profiles"][0]["route_non_ru"] = serde_json::json!("DE fallback");
+        let mut store = Store::default();
+        store.subscriptions.push(Subscription {
+            id: "s1".into(),
+            name: "test".into(),
+            source: "x".into(),
+            fetched_at: 0,
+            raw,
+        });
+        store.profiles.push(Profile {
+            id: "s1::a".into(),
+            sub_id: "s1".into(),
+            name: "Split".into(),
+            mode: "vpn".into(),
+            split: None,
+            route_ru: None,
+            route_non_ru: None,
+            route_private: None,
+        });
+        assert!(store.migrate_profile_routes());
+        assert_eq!(store.profiles[0].route_non_ru.as_deref(), Some("DE fallback"));
     }
 
     #[test]
