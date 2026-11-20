@@ -1295,7 +1295,7 @@ impl eframe::App for App {
             }
         }
 
-        if self.shared.lock().tests.len() > 0 {
+        if !self.shared.lock().test_busy {
             self.profile_test_busy = None;
         }
     }

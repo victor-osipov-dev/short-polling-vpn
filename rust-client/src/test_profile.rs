@@ -2,6 +2,7 @@
 //! fetches the check URL through it, so the whole path is exercised.
 
 use anyhow::{Context, Result};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
 use std::net::TcpListener as StdListener;
 use std::sync::Arc;
@@ -167,7 +168,44 @@ impl Decision {
 }
 
 /// Runs tests with limited concurrency (starting many tunnels at once would
-/// compete for CPU and distort latency).
+/// compete for CPU and distort latency). Each result is reported as soon as it
+/// is ready, and a finished slot immediately picks up the next profile.
+pub async fn test_many_stream<F>(
+    profiles: Vec<ResolvedProfile>,
+    cache_dir: std::path::PathBuf,
+    target: String,
+    timeout: Duration,
+    parallel: usize,
+    mut on_result: F,
+) -> Vec<TestResult>
+where
+    F: FnMut(TestResult),
+{
+    let mut profiles = profiles.into_iter();
+    let mut tasks = FuturesUnordered::new();
+    let spawn = |profile: ResolvedProfile, cache: std::path::PathBuf, target: String| {
+        tokio::spawn(async move { test_profile(profile, &cache, &target, timeout).await })
+    };
+    for _ in 0..parallel.max(1) {
+        if let Some(profile) = profiles.next() {
+            tasks.push(spawn(profile, cache_dir.clone(), target.clone()));
+        }
+    }
+    let mut results = Vec::new();
+    while let Some(joined) = tasks.next().await {
+        if let Ok(result) = joined {
+            on_result(result.clone());
+            results.push(result);
+        }
+        if let Some(profile) = profiles.next() {
+            tasks.push(spawn(profile, cache_dir.clone(), target.clone()));
+        }
+    }
+    results
+}
+
+/// Collects all results before returning (used by callers that need the whole
+/// list, e.g. JSON output).
 pub async fn test_many(
     profiles: Vec<ResolvedProfile>,
     cache_dir: std::path::PathBuf,
@@ -175,24 +213,7 @@ pub async fn test_many(
     timeout: Duration,
     parallel: usize,
 ) -> Vec<TestResult> {
-    let mut results = Vec::new();
-    for chunk in profiles.chunks(parallel.max(1)) {
-        let mut tasks = Vec::new();
-        for profile in chunk {
-            let profile = profile.clone();
-            let cache = cache_dir.clone();
-            let target = target.clone();
-            tasks.push(tokio::spawn(async move {
-                test_profile(profile, &cache, &target, timeout).await
-            }));
-        }
-        for task in tasks {
-            if let Ok(result) = task.await {
-                results.push(result);
-            }
-        }
-    }
-    results
+    test_many_stream(profiles, cache_dir, target, timeout, parallel, |_| {}).await
 }
 
 /// Convenience for a single quick exit-IP lookup without a profile.

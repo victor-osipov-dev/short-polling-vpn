@@ -526,7 +526,7 @@ impl ResolvedProfile {
 
     pub fn from_subscription(store: &Store, sub: &Subscription, profile: Option<&Profile>) -> Result<Self> {
         let mut settings = store.settings.clone();
-        let nodes: Vec<Node> = serde_json::from_value(
+        let mut nodes: Vec<Node> = serde_json::from_value(
             sub.raw
                 .get("nodes")
                 .cloned()
@@ -603,14 +603,15 @@ impl ResolvedProfile {
             resolved.keys = Keys::from_psk_b64(psk)?;
         }
 
-        let disabled: HashSet<&str> = settings.disabled_urls.iter().map(String::as_str).collect();
-        resolved.urls = dedup_urls(
-            &nodes
-                .iter()
-                .filter(|n| !disabled.contains(n.url.trim_end_matches('/')))
-                .map(|n| n.url.clone())
-                .collect::<Vec<_>>(),
-        );
+        // A disabled node must also disappear from route candidates: otherwise
+        // a route that names it keeps selecting a node the user turned off.
+        let disabled: HashSet<String> = settings
+            .disabled_urls
+            .iter()
+            .map(|url| url.trim_end_matches('/').to_owned())
+            .collect();
+        nodes.retain(|node| !disabled.contains(node.url.trim_end_matches('/')));
+        resolved.urls = dedup_urls(&nodes.iter().map(|n| n.url.clone()).collect::<Vec<_>>());
         resolved.nodes = nodes;
         resolved.routes = all_routes;
         resolved.split = split;

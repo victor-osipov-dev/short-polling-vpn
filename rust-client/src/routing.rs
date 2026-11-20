@@ -438,8 +438,20 @@ impl Router {
             );
         }
 
-        // Prefer nodes that are currently not quarantined, but never fail just
-        // because all of them are: the chain may still work.
+        // Prefer nodes that are currently not quarantined. If every candidate
+        // of a route is down, fail over to a healthy node from the rest of the
+        // subscription instead of sending traffic into a dead entry server.
+        let fallback_nodes: Vec<(String, String)> = self
+            .fallback_urls
+            .iter()
+            .filter(|url| available.contains(url.as_str()))
+            .map(|url| {
+                (
+                    self.url_nodes.get(url.as_str()).cloned().unwrap_or_default(),
+                    url.clone(),
+                )
+            })
+            .collect();
         let filtered: Vec<Vec<(String, String)>> = pools
             .iter()
             .map(|pool| {
@@ -448,10 +460,20 @@ impl Router {
                     .filter(|(_, url)| available.is_empty() || available.contains(url))
                     .cloned()
                     .collect();
-                if usable.is_empty() {
+                if !usable.is_empty() || available.is_empty() {
+                    return if usable.is_empty() { pool.clone() } else { usable };
+                }
+                let healthy: Vec<_> = fallback_nodes
+                    .iter()
+                    .filter(|(_, url)| !pool.iter().any(|(_, candidate)| candidate == url))
+                    .cloned()
+                    .collect();
+                if healthy.is_empty() {
+                    tracing::warn!("route {route_name:?}: all nodes unavailable, using a failed node");
                     pool.clone()
                 } else {
-                    usable
+                    tracing::warn!("route {route_name:?}: configured nodes unavailable, failing over");
+                    healthy
                 }
             })
             .collect();

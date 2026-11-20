@@ -614,31 +614,39 @@ async fn cmd_test(dir: &std::path::Path, args: TestArgs, json: bool) -> Result<(
     if profiles.is_empty() {
         anyhow::bail!("no profiles to test");
     }
-    let results = spvpn::test_profile::test_many(
-        profiles,
-        dir.join("cache"),
-        target,
-        Duration::from_secs(args.timeout),
-        args.parallel,
-    )
-    .await;
+    let timeout = Duration::from_secs(args.timeout);
+    let cache = dir.join("cache");
+    let results = if json {
+        spvpn::test_profile::test_many(profiles, cache, target, timeout, args.parallel).await
+    } else {
+        // Print each result as soon as it arrives instead of waiting for the
+        // whole batch; a full run can take minutes when nodes are unreachable.
+        spvpn::test_profile::test_many_stream(
+            profiles,
+            cache,
+            target,
+            timeout,
+            args.parallel,
+            |r| {
+                if r.ok {
+                    println!(
+                        "OK   {:<24} {:>6} ms  exit {:<15}  {}",
+                        r.profile, r.latency_ms, r.exit_ip, r.route
+                    );
+                } else {
+                    println!(
+                        "FAIL {:<24} {:>6} ms  {}  ({})",
+                        r.profile, r.latency_ms, r.error, r.route
+                    );
+                }
+            },
+        )
+        .await
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        for r in &results {
-            if r.ok {
-                println!(
-                    "OK   {:<24} {:>6} ms  exit {:<15}  {}",
-                    r.profile, r.latency_ms, r.exit_ip, r.route
-                );
-            } else {
-                println!(
-                    "FAIL {:<24} {:>6} ms  {}  ({})",
-                    r.profile, r.latency_ms, r.error, r.route
-                );
-            }
-        }
         let ok = results.iter().filter(|r| r.ok).count();
         println!("\n{ok}/{} profile(s) passed", results.len());
     }

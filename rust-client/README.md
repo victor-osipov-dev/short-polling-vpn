@@ -119,7 +119,7 @@ spvpn run --no-tui
 | `spvpn use <name\|id>` | Выбрать активный профиль |
 | `spvpn subs add <url\|file\|json> [--name N]` | Добавить подписку |
 | `spvpn subs list` / `subs refresh [id]` / `subs remove <id>` | Управление подписками |
-| `spvpn test [profile] [--all] [--parallel N] [--target URL] [--json]` | Проверить связь: exit IP, задержка, маршрут |
+| `spvpn test [profile] [--all] [--parallel N] [--target URL] [--json]` | Проверить связь: exit IP, задержка, маршрут (результаты выводятся по мере готовности) |
 | `spvpn status [--json]` | Состояние демона, счётчики, здоровье URL |
 | `spvpn stop` | Остановить демон |
 | `spvpn config show\|path\|set <key> <value>` | Настройки |
@@ -217,7 +217,9 @@ TUN-настройки (`tun-address`, `tun-netmask`, `tun-dns`, `tun-mtu`,
   стримом; после полла воркер не спит фиксированные 200 мс, а ждёт события (новые данные,
   новое соединение, EOF) с таймаутом — это снижает задержку первого байта.
 - Ошибка URL закрывает только сессии этой группы, затем URL уходит в карантин и проверяется
-  фоновым health-поллом.
+  фоновым health-поллом. Если все узлы маршрута в карантине, используется рабочий узел из
+  остальной подписки (в логе: `failing over`).
+- Отключённый в GUI узел удаляется и из списка кандидатов маршрутов, а не только из пула URL.
 - Обмен: HKDF-SHA256 + AES-256-GCM, HMAC-SHA256 по `client_id + user + device + route + ts + blob`.
 
 ## Производительность

@@ -213,17 +213,22 @@ impl Backend {
         let shared = self.shared.clone();
         let cache = self.dir.join("cache");
         self.rt.spawn(async move {
-            let results =
-                test_profile::test_many(profiles, cache, target, Duration::from_secs(20), 2).await;
-            let exit = results
-                .iter()
-                .find(|r| r.ok)
-                .map(|r| r.exit_ip.clone())
-                .unwrap_or_default();
-            let mut state = shared.lock();
-            state.tests = results;
-            state.exit_ip = exit;
-            state.test_busy = false;
+            let _results = test_profile::test_many_stream(
+                profiles,
+                cache,
+                target,
+                Duration::from_secs(20),
+                2,
+                |result| {
+                    let mut state = shared.lock();
+                    if result.ok && state.exit_ip.is_empty() {
+                        state.exit_ip = result.exit_ip.clone();
+                    }
+                    state.tests.push(result);
+                },
+            )
+            .await;
+            shared.lock().test_busy = false;
         });
         true
     }
