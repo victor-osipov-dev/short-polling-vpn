@@ -211,6 +211,7 @@ async fn main() {
     let dir = config_dir(&cli);
     let result = run(cli, dir.clone()).await;
     if let Err(err) = result {
+        tracing::error!("{err:#}");
         eprintln!("error: {err:#}");
         std::process::exit(1);
     }

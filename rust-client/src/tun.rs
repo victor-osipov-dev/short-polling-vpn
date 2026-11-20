@@ -237,6 +237,9 @@ pub struct TunRuntime {
     reader: Option<std::thread::JoinHandle<()>>,
     routes: Mutex<Routes>,
     direct_routes: Arc<Mutex<HashSet<Ipv4Addr>>>,
+    // Declared last: on drop, release the create handle only after the
+    // session and adapter handles are gone.
+    create_guard: Option<AdapterCreateGuard>,
 }
 
 impl TunRuntime {
@@ -252,39 +255,58 @@ impl TunRuntime {
         let dll = ensure_wintun(state_dir)?;
         let wintun = unsafe { wintun::load_from_path(&dll) }
             .with_context(|| format!("cannot load {}", dll.display()))?;
-        let adapter = match wintun::Adapter::open(&wintun, TUN_NAME) {
-            Ok(adapter) => adapter,
-            Err(_) => wintun::Adapter::create(&wintun, TUN_NAME, TUN_TYPE, Some(ADAPTER_GUID))
-                .context("cannot create Wintun adapter (run as Administrator)")?,
-        };
-        adapter
-            .set_name(TUN_NAME)
-            .context("cannot rename Wintun adapter")?;
-        adapter
-            .set_address(config.address)
-            .context("cannot set TUN address")?;
-        adapter
-            .set_netmask(config.netmask)
-            .context("cannot set TUN netmask")?;
-        adapter
-            .set_gateway(Some(config.address))
-            .context("cannot set TUN gateway")?;
-        // Only the IPv4 resolver is advertised: the stack has no IPv6 DNS
-        // listener, and a dead IPv6 server would delay every lookup.
-        adapter
-            .set_dns_servers(&[IpAddr::V4(config.dns)])
-            .context("cannot set TUN DNS")?;
-        adapter
-            .set_mtu(config.mtu)
-            .context("cannot set TUN MTU")?;
+        let (adapter, create_guard) = open_or_create_adapter(&wintun)?;
         let index = adapter
             .get_adapter_index()
             .context("cannot query TUN interface index")?;
+        // A Wintun adapter reports media disconnected until a session is
+        // started, and netsh refuses to configure an IP on such an interface.
         let session = Arc::new(
             adapter
                 .start_session(wintun::MAX_RING_CAPACITY)
                 .context("cannot start Wintun session")?,
         );
+        if adapter.get_name().ok().as_deref() != Some(TUN_NAME) {
+            adapter
+                .set_name(TUN_NAME)
+                .context("cannot rename Wintun adapter")?;
+        }
+        // Set address, mask and gateway in one netsh call: the wintun helpers
+        // read the address back through GetAdaptersAddresses, which can lag
+        // behind netsh on a freshly created adapter.
+        run_netsh(&[
+            "interface",
+            "ipv4",
+            "set",
+            "address",
+            &format!("name=\"{TUN_NAME}\""),
+            "static",
+            &config.address.to_string(),
+            &config.netmask.to_string(),
+            &config.address.to_string(),
+        ])
+        .context("cannot set TUN address")?;
+        // Only the IPv4 resolver is advertised: the stack has no IPv6 DNS
+        // listener, and a dead IPv6 server would delay every lookup.
+        // SetInterfaceDnsSettings does not always show up in the adapter's
+        // netsh configuration, so configure the resolver with netsh first.
+        if let Err(err) = run_netsh(&[
+            "interface",
+            "ipv4",
+            "set",
+            "dns",
+            &format!("name=\"{TUN_NAME}\""),
+            "source=static",
+            &format!("address={}", config.dns),
+        ]) {
+            tracing::warn!("cannot set TUN DNS via netsh: {err:#}");
+            adapter
+                .set_dns_servers(&[IpAddr::V4(config.dns)])
+                .context("cannot set TUN DNS")?;
+        }
+        adapter
+            .set_mtu(config.mtu)
+            .context("cannot set TUN MTU")?;
 
         let (stack, runner, udp, tcp) = netstack_smoltcp::StackBuilder::default()
             .enable_tcp(true)
@@ -445,6 +467,7 @@ impl TunRuntime {
             reader: Some(reader),
             routes: Mutex::new(routes),
             direct_routes,
+            create_guard,
         })
     }
 
@@ -469,6 +492,7 @@ impl TunRuntime {
         let _ = self.adapter.set_gateway(None);
         drop(self.session);
         drop(self.adapter);
+        self.create_guard = None;
         tracing::info!("TUN stopped");
     }
 }
@@ -885,6 +909,118 @@ fn dns_name(packet: &[u8], start: usize) -> Option<(String, usize)> {
         offset = finish;
     }
     None
+}
+
+/// Keeps the raw handle returned by `WintunCreateAdapter` alive. Closing that
+/// handle removes the adapter instance entirely, so it must stay open while
+/// the tunnel is running. It is released only after the session is stopped.
+struct AdapterCreateGuard {
+    wintun: wintun::Wintun,
+    handle: usize,
+}
+
+impl Drop for AdapterCreateGuard {
+    fn drop(&mut self) {
+        unsafe { self.wintun.WintunCloseAdapter(self.handle as *mut _) };
+    }
+}
+
+/// Open (or create) our Wintun adapter by alias.
+///
+/// `wintun::Adapter::create` maps the requested name back to a LUID using
+/// `ConvertInterfaceAliasToLuid`. On localized Windows the freshly created
+/// adapter gets a localized alias (`Подключение по локальной сети N`) instead
+/// of `SPVPN`, so that lookup fails with ERROR_NOT_FOUND (0x490) even though
+/// the adapter was created. We create it through the raw API, resolve its
+/// LUID, rename the alias with netsh and then use the safe `Adapter::open`.
+fn open_or_create_adapter(
+    wintun: &wintun::Wintun,
+) -> Result<(Arc<wintun::Adapter>, Option<AdapterCreateGuard>)> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        ConvertInterfaceLuidToAlias, ConvertInterfaceLuidToIndex,
+    };
+
+    // Fast path: a previous run left an adapter whose alias is already `SPVPN`.
+    if let Ok(adapter) = wintun::Adapter::open(wintun, TUN_NAME) {
+        return Ok((adapter, None));
+    }
+
+    let name: Vec<u16> = TUN_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    let tunnel_type: Vec<u16> = TUN_TYPE.encode_utf16().chain(std::iter::once(0)).collect();
+    let guid = windows_sys::core::GUID::from_u128(ADAPTER_GUID);
+
+    // With a fixed GUID this is idempotent: an existing adapter is reused.
+    let handle = unsafe {
+        wintun.WintunCreateAdapter(
+            name.as_ptr(),
+            tunnel_type.as_ptr(),
+            &guid as *const windows_sys::core::GUID as *const _,
+        )
+    };
+    if handle.is_null() {
+        tracing::error!("WintunCreateAdapter failed (run as Administrator)");
+        anyhow::bail!("WintunCreateAdapter failed (run as Administrator)");
+    }
+
+    let (alias, index) = unsafe {
+        let mut luid: windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH =
+            std::mem::zeroed();
+        wintun.WintunGetAdapterLUID(handle, &mut luid as *mut _ as *mut _);
+
+        let mut alias = vec![0u16; 257];
+        let rc = ConvertInterfaceLuidToAlias(&luid, alias.as_mut_ptr(), alias.len());
+        if rc != 0 {
+            tracing::error!("ConvertInterfaceLuidToAlias failed: {rc:#x}");
+            anyhow::bail!("ConvertInterfaceLuidToAlias failed: {rc:#x}");
+        }
+        let len = alias.iter().position(|c| *c == 0).unwrap_or(alias.len());
+        let alias = String::from_utf16_lossy(&alias[..len]);
+
+        let mut index = 0u32;
+        let rc = ConvertInterfaceLuidToIndex(&luid, &mut index);
+        if rc != 0 {
+            tracing::error!("ConvertInterfaceLuidToIndex failed: {rc:#x}");
+            anyhow::bail!("ConvertInterfaceLuidToIndex failed: {rc:#x}");
+        }
+        (alias, index)
+    };
+    tracing::info!("Wintun adapter alias={alias:?} index={index}");
+    // Keep this handle alive: WintunCloseAdapter removes the adapter instance.
+    let guard = AdapterCreateGuard {
+        wintun: wintun.clone(),
+        handle: handle as usize,
+    };
+
+    if alias != TUN_NAME {
+        tracing::info!("renaming Wintun adapter {alias:?} -> {TUN_NAME:?} (index {index})");
+        run_netsh(&[
+            "interface",
+            "set",
+            "interface",
+            &format!("name=\"{alias}\""),
+            &format!("newname=\"{TUN_NAME}\""),
+        ])
+        .with_context(|| format!("cannot rename Wintun adapter {alias:?}"))
+        .inspect_err(|err| tracing::error!("{err:#}"))?;
+    }
+
+    // The alias database may need a moment after netsh returns.
+    let mut last_err = None;
+    for _ in 0..10 {
+        match wintun::Adapter::open(wintun, TUN_NAME) {
+            Ok(adapter) => return Ok((adapter, Some(guard))),
+            Err(err) => {
+                last_err = Some(err);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    let message = format!(
+        "cannot open Wintun adapter after rename (alias {alias:?}, index {index}): {}",
+        last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".into())
+    );
+    tracing::error!("{message}");
+    anyhow::bail!("{message}")
 }
 
 fn physical_gateway(tun_address: Ipv4Addr) -> Option<Ipv4Addr> {
