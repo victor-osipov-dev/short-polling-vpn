@@ -344,7 +344,8 @@ impl App {
 
     fn elevate(&mut self) {
         self.backend.disconnect_blocking();
-        match tun::relaunch_elevated(&["--minimized".into()]) {
+        let dir = self.dir.to_string_lossy().into_owned();
+        match tun::relaunch_elevated(&["--dir".into(), dir]) {
             Ok(()) => {
                 self.quitting = true;
                 std::process::exit(0);
