@@ -320,6 +320,9 @@ impl TunRuntime {
         let udp = udp.context("netstack UDP socket is missing")?;
 
         let gateway = physical_gateway(config.address);
+        // Find the physical adapter's local address before the TUN routes are
+        // installed; the DNS proxy binds to it so only that socket goes direct.
+        let dns_bind_ip = gateway.and_then(physical_local_ipv4);
         let mut routes = Routes::new(index);
         let gateway_label = gateway
             .map(|ip| ip.to_string())
@@ -347,9 +350,9 @@ impl TunRuntime {
                     pin(&ip.to_string(), "255.255.255.255", "entry server");
                 }
             }
-            if let IpAddr::V4(ip) = config.dns_upstream.ip() {
-                pin(&ip.to_string(), "255.255.255.255", "DNS upstream");
-            }
+            // The DNS upstream is deliberately NOT pinned here: a /32 route
+            // would also let applications reach it over HTTPS (DoH) outside
+            // the tunnel. Only the proxy socket is bound to the physical IP.
             for net in &config.exclusions {
                 pin(
                     &net.network().to_string(),
@@ -438,6 +441,7 @@ impl TunRuntime {
             running.clone(),
             config.dns,
             config.dns_upstream,
+            dns_bind_ip,
             gateway,
             direct_routes.clone(),
         ));
@@ -445,6 +449,7 @@ impl TunRuntime {
             udp,
             cache,
             config.dns_upstream,
+            dns_bind_ip,
             running.clone(),
         ));
 
@@ -505,6 +510,7 @@ async fn accept_loop(
     running: Arc<AtomicBool>,
     dns: Ipv4Addr,
     dns_upstream: SocketAddr,
+    dns_bind_ip: Option<Ipv4Addr>,
     gateway: Option<Ipv4Addr>,
     direct_routes: Arc<Mutex<HashSet<Ipv4Addr>>>,
 ) {
@@ -536,7 +542,7 @@ async fn accept_loop(
             // Only the address we advertised as DNS is treated as DNS; port 53
             // may legitimately host other services.
             if remote.port() == 53 && remote.ip() == IpAddr::V4(dns) {
-                if let Err(err) = dns_tcp(stream, dns_upstream, &cache).await {
+                if let Err(err) = dns_tcp(stream, dns_upstream, dns_bind_ip, &cache).await {
                     tracing::debug!("DNS/TCP: {err:#}");
                 }
                 return;
@@ -699,6 +705,7 @@ async fn udp_loop(
     udp: netstack_smoltcp::UdpSocket,
     cache: Arc<DomainCache>,
     upstream: SocketAddr,
+    bind_ip: Option<Ipv4Addr>,
     running: Arc<AtomicBool>,
 ) {
     let (mut reader, writer) = udp.split();
@@ -714,7 +721,7 @@ async fn udp_loop(
         let cache = cache.clone();
         let writer = writer.clone();
         tokio::spawn(async move {
-            match dns_query(&payload, upstream).await {
+            match dns_query(&payload, upstream, bind_ip).await {
                 Ok(response) => {
                     learn_dns(&response, &cache);
                     let mut guard = writer.lock().await;
@@ -726,13 +733,20 @@ async fn udp_loop(
     }
 }
 
-async fn dns_query(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
-    let bind = if upstream.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
+async fn dns_query(
+    query: &[u8],
+    upstream: SocketAddr,
+    bind_ip: Option<Ipv4Addr>,
+) -> Result<Vec<u8>> {
+    let socket = match bind_ip {
+        Some(ip) if upstream.is_ipv4() => {
+            tokio::net::UdpSocket::bind(SocketAddr::new(IpAddr::V4(ip), 0)).await?
+        }
+        _ => {
+            let bind = if upstream.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+            tokio::net::UdpSocket::bind(bind).await?
+        }
     };
-    let socket = tokio::net::UdpSocket::bind(bind).await?;
     socket.connect(upstream).await?;
     let mut buf = vec![0u8; 4096];
     let mut last_err = None;
@@ -742,7 +756,7 @@ async fn dns_query(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
             Ok(Ok(n)) => {
                 let response = buf[..n].to_vec();
                 if response.len() > 2 && response[2] & 0x02 != 0 {
-                    return dns_tcp_query(query, upstream).await;
+                    return dns_tcp_query(query, upstream, bind_ip).await;
                 }
                 return Ok(response);
             }
@@ -755,13 +769,23 @@ async fn dns_query(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
         .unwrap_or_else(|| anyhow::anyhow!("DNS timeout")))
 }
 
-async fn dns_tcp_query(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::net::TcpStream::connect(upstream),
-    )
-    .await
-    .context("DNS/TCP connect timed out")??;
+async fn dns_tcp_query(
+    query: &[u8],
+    upstream: SocketAddr,
+    bind_ip: Option<Ipv4Addr>,
+) -> Result<Vec<u8>> {
+    let connect = async {
+        if let (Some(ip), true) = (bind_ip, upstream.is_ipv4()) {
+            let socket = tokio::net::TcpSocket::new_v4()?;
+            socket.bind(SocketAddr::new(IpAddr::V4(ip), 0))?;
+            socket.connect(upstream).await
+        } else {
+            tokio::net::TcpStream::connect(upstream).await
+        }
+    };
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), connect)
+        .await
+        .context("DNS/TCP connect timed out")??;
     let mut framed = Vec::with_capacity(query.len() + 2);
     framed.extend_from_slice(&(query.len() as u16).to_be_bytes());
     framed.extend_from_slice(query);
@@ -786,6 +810,7 @@ async fn dns_tcp_query(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
 async fn dns_tcp(
     mut stream: netstack_smoltcp::TcpStream,
     upstream: SocketAddr,
+    bind_ip: Option<Ipv4Addr>,
     cache: &DomainCache,
 ) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(15), async move {
@@ -797,7 +822,7 @@ async fn dns_tcp(
         }
         let mut query = vec![0u8; size];
         stream.read_exact(&mut query).await?;
-        let response = dns_tcp_query(&query, upstream).await?;
+        let response = dns_tcp_query(&query, upstream, bind_ip).await?;
         // DNS-over-TCP answers must teach the split-routing cache too.
         learn_dns(&response, cache);
         let mut framed = Vec::with_capacity(response.len() + 2);
@@ -1031,6 +1056,18 @@ fn physical_gateway(tun_address: Ipv4Addr) -> Option<Ipv4Addr> {
             IpAddr::V4(ip) if !ip.is_unspecified() && ip != tun_address => Some(ip),
             _ => None,
         })
+}
+
+/// Local IPv4 address of the physical interface that reaches `gateway`.
+/// Connecting a UDP socket (without sending) asks the OS to pick the source
+/// address; this must run before the TUN routes are installed.
+fn physical_local_ipv4(gateway: Ipv4Addr) -> Option<Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((gateway, 53)).ok()?;
+    match socket.local_addr().ok()? {
+        SocketAddr::V4(addr) => Some(*addr.ip()),
+        SocketAddr::V6(_) => None,
+    }
 }
 
 fn ensure_wintun(state_dir: &Path) -> Result<PathBuf> {
