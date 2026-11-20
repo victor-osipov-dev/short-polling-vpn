@@ -762,6 +762,13 @@ fn cmd_config(dir: &std::path::Path, args: ConfigArgs, json: bool) -> Result<()>
                         store.active = Some(MANUAL_PROFILE_ID.into());
                     }
                 }
+                "disabled" | "disabled_urls" => {
+                    s.disabled_urls = value
+                        .split(',')
+                        .map(|url| url.trim().trim_end_matches('/').to_owned())
+                        .filter(|url| !url.is_empty())
+                        .collect();
+                }
                 "check-url" | "check_url" => s.check_url = value,
                 "poll-path" | "poll_path" => s.poll_path = value,
                 "host-header" | "host_header" => {

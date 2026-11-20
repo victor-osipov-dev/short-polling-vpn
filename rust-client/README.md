@@ -132,6 +132,7 @@ spvpn test --all --parallel 4
 spvpn test 089aabde-0d81-4d5e-946b-513901db4c16::relay --target https://ifconfig.me/ip
 spvpn config set cooldown 30
 spvpn config set urls "https://edge1.example.com,https://edge2.example.com"
+spvpn config set disabled_urls "https://dead.example.com:8443"   # исключить узел из маршрутов
 ```
 
 ## Interface
