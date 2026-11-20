@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -26,6 +26,12 @@ const TUN_TYPE: &str = "SPVPN";
 const ADAPTER_GUID: u128 = 0x5350_5650_4e00_4a31_9e6d_5f0d_9b3c_7a11;
 const WINTUN_DLL: &[u8] = include_bytes!("../resources/wintun.dll");
 const ROUTE_NO_WINDOW: u32 = 0x0800_0000;
+/// Upper bound on concurrent TUN connections; protects against a runaway
+/// application opening sockets faster than the tunnel can carry them.
+const MAX_TUN_CONNECTIONS: usize = 512;
+const DNS_TTL_MIN: u32 = 30;
+const DNS_TTL_MAX: u32 = 3600;
+const DNS_DEFAULT_TTL: u32 = 300;
 
 #[derive(Clone, Debug)]
 pub struct TunConfig {
@@ -34,7 +40,9 @@ pub struct TunConfig {
     pub dns: Ipv4Addr,
     pub mtu: usize,
     pub dns_upstream: SocketAddr,
-    pub exclusions: Vec<Ipv4Addr>,
+    /// IPv4 prefixes kept on the physical route (direct split routing, local
+    /// resources, custom exclusions).
+    pub exclusions: Vec<ipnet::Ipv4Net>,
 }
 
 impl TunConfig {
@@ -57,12 +65,16 @@ impl TunConfig {
             .unwrap_or_else(|_| SocketAddr::from(([1, 1, 1, 1], 53)));
         let mut exclusions = Vec::new();
         for value in &settings.tun_exclude {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
             if let Ok(ip) = value.parse::<Ipv4Addr>() {
-                exclusions.push(ip);
+                exclusions.push(ipnet::Ipv4Net::new(ip, 32).expect("valid /32"));
             } else if let Ok(net) = value.parse::<ipnet::Ipv4Net>() {
-                if net.prefix_len() == 32 {
-                    exclusions.push(net.addr());
-                }
+                exclusions.push(net);
+            } else {
+                tracing::warn!("ignoring invalid TUN exclusion {value:?}");
             }
         }
         Ok(Self {
@@ -78,25 +90,53 @@ impl TunConfig {
 
 #[derive(Default)]
 pub struct DomainCache {
-    inner: Mutex<HashMap<IpAddr, String>>,
+    inner: Mutex<HashMap<IpAddr, (String, Instant)>>,
 }
 
 impl DomainCache {
     pub fn host_for(&self, ip: IpAddr) -> Option<String> {
-        self.inner.lock().get(&ip).cloned()
+        let mut inner = self.inner.lock();
+        match inner.get(&ip) {
+            Some((name, expires)) if *expires > Instant::now() => Some(name.clone()),
+            Some(_) => {
+                inner.remove(&ip);
+                None
+            }
+            None => None,
+        }
     }
 
-    fn insert(&self, ip: IpAddr, name: String) {
-        self.inner.lock().insert(ip, name);
+    fn insert(&self, ip: IpAddr, name: String, ttl: u32) {
+        let ttl = ttl.clamp(DNS_TTL_MIN, DNS_TTL_MAX);
+        let mut inner = self.inner.lock();
+        // Keep the map bounded even when a resolver returns huge answer sets;
+        // expired entries are cheap to drop here.
+        if inner.len() > 4096 {
+            let now = Instant::now();
+            inner.retain(|_, (_, expires)| *expires > now);
+        }
+        inner.insert(ip, (name, Instant::now() + Duration::from_secs(ttl as u64)));
     }
 }
 
 struct Routes {
-    added: Vec<String>,
+    /// (destination, mask) pairs. The mask is mandatory: `route delete 0.0.0.0`
+    /// would remove every default route, including the physical one.
+    added: Vec<(String, String)>,
+    v6_added: Vec<String>,
+    if_index: u32,
 }
 
 impl Routes {
-    fn add(&mut self, target: &str, mask: &str, gateway: &str, if_index: Option<u32>) {
+    fn new(if_index: u32) -> Self {
+        Self {
+            added: Vec::new(),
+            v6_added: Vec::new(),
+            if_index,
+        }
+    }
+
+    fn add(&mut self, target: &str, mask: &str, gateway: &str, if_index: Option<u32>) -> Result<()> {
         let mut args = vec![
             "add".to_owned(),
             target.to_owned(),
@@ -110,21 +150,69 @@ impl Routes {
         }
         args.push("metric".to_owned());
         args.push("1".to_owned());
-        if run_route(&args).is_ok() {
-            self.added.push(target.to_owned());
+        run_route(&args)?;
+        self.added.push((target.to_owned(), mask.to_owned()));
+        Ok(())
+    }
+
+    /// Adds one of the two `/1` routes that override the physical default
+    /// route. A stale copy from a crashed session is removed first so `add`
+    /// does not fail with "object already exists".
+    fn add_default(&mut self, target: &str, mask: &str, gateway: &str) -> Result<()> {
+        let _ = run_route(&[
+            "delete".to_owned(),
+            target.to_owned(),
+            "mask".to_owned(),
+            mask.to_owned(),
+        ]);
+        self.add(target, mask, gateway, Some(self.if_index))
+    }
+
+    /// IPv6 has no relay support, so its traffic is routed into the TUN where
+    /// it is dropped instead of leaking through the physical adapter. Failure
+    /// is not fatal (IPv6 may already be disabled on the adapter).
+    fn add_v6_blackhole(&mut self, prefix: &str) {
+        let index = self.if_index.to_string();
+        if let Err(err) = run_netsh(&[
+            "interface",
+            "ipv6",
+            "add",
+            "route",
+            prefix,
+            &format!("interface={index}"),
+            "metric=1",
+            "store=active",
+        ]) {
+            tracing::warn!("cannot add IPv6 route {prefix}: {err:#}");
+            return;
         }
+        self.v6_added.push(prefix.to_owned());
     }
 
     fn cleanup(&mut self) {
-        for target in self.added.drain(..) {
-            let _ = run_route(&["delete".to_owned(), target.clone()]);
-            let _ = run_route(&[
-                "delete".to_owned(),
-                target,
-                "mask".to_owned(),
-                "255.255.255.255".to_owned(),
+        for (target, mask) in self.added.drain(..) {
+            let _ = run_route(&["delete".to_owned(), target, "mask".to_owned(), mask]);
+        }
+        let index = self.if_index.to_string();
+        for prefix in self.v6_added.drain(..) {
+            let _ = run_netsh(&[
+                "interface",
+                "ipv6",
+                "delete",
+                "route",
+                &prefix,
+                &format!("interface={index}"),
+                "store=active",
             ]);
         }
+    }
+}
+
+impl Drop for Routes {
+    fn drop(&mut self) {
+        // Safety net for failures after routes were installed, or for a
+        // runtime dropped without `stop()`.
+        self.cleanup();
     }
 }
 
@@ -147,6 +235,9 @@ impl TunRuntime {
         cache: Arc<DomainCache>,
         state_dir: &Path,
     ) -> Result<Self> {
+        if !is_elevated() {
+            anyhow::bail!("VPN mode requires Administrator rights");
+        }
         let dll = ensure_wintun(state_dir)?;
         let wintun = unsafe { wintun::load_from_path(&dll) }
             .with_context(|| format!("cannot load {}", dll.display()))?;
@@ -167,9 +258,10 @@ impl TunRuntime {
         adapter
             .set_gateway(Some(config.address))
             .context("cannot set TUN gateway")?;
-        let dns6: Ipv6Addr = "fd00:7::53".parse().expect("valid dns6");
+        // Only the IPv4 resolver is advertised: the stack has no IPv6 DNS
+        // listener, and a dead IPv6 server would delay every lookup.
         adapter
-            .set_dns_servers(&[IpAddr::V4(config.dns), IpAddr::V6(dns6)])
+            .set_dns_servers(&[IpAddr::V4(config.dns)])
             .context("cannot set TUN DNS")?;
         adapter
             .set_mtu(config.mtu)
@@ -194,35 +286,43 @@ impl TunRuntime {
         let tcp = tcp.context("netstack TCP listener is missing")?;
         let udp = udp.context("netstack UDP socket is missing")?;
 
-        if !is_elevated() {
-            anyhow::bail!("VPN mode requires Administrator rights");
-        }
-
-        let gateway = physical_gateway();
-        let mut routes = Routes {
-            added: Vec::new(),
-        };
+        let gateway = physical_gateway(config.address);
+        let mut routes = Routes::new(index);
         let gateway_label = gateway
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| "0.0.0.0".into());
         // Two /1 routes override the physical default route without deleting
         // it, which makes cleanup safe even after a crash.
-        routes.add("0.0.0.0", "128.0.0.0", &config.address.to_string(), Some(index));
-        routes.add("128.0.0.0", "128.0.0.0", &config.address.to_string(), Some(index));
+        routes
+            .add_default("0.0.0.0", "128.0.0.0", &config.address.to_string())
+            .context("cannot add TUN route 0.0.0.0/1")?;
+        routes
+            .add_default("128.0.0.0", "128.0.0.0", &config.address.to_string())
+            .context("cannot add TUN route 128.0.0.0/1")?;
+        // No IPv6 relay: keep IPv6 inside the tunnel instead of leaking it
+        // past the physical adapter.
+        routes.add_v6_blackhole("::/1");
+        routes.add_v6_blackhole("8000::/1");
         if gateway.is_some() {
+            let mut pin = |target: &str, mask: &str, what: &str| {
+                if let Err(err) = routes.add(target, mask, &gateway_label, None) {
+                    tracing::warn!("cannot route {what} {target} via {gateway_label}: {err:#}");
+                }
+            };
             for ip in tunnel.server_ips() {
                 if let IpAddr::V4(ip) = ip {
-                    routes.add(&ip.to_string(), "255.255.255.255", &gateway_label, None);
+                    pin(&ip.to_string(), "255.255.255.255", "entry server");
                 }
             }
-            routes.add(
-                &config.dns_upstream.ip().to_string(),
-                "255.255.255.255",
-                &gateway_label,
-                None,
-            );
-            for ip in &config.exclusions {
-                routes.add(&ip.to_string(), "255.255.255.255", &gateway_label, None);
+            if let IpAddr::V4(ip) = config.dns_upstream.ip() {
+                pin(&ip.to_string(), "255.255.255.255", "DNS upstream");
+            }
+            for net in &config.exclusions {
+                pin(
+                    &net.network().to_string(),
+                    &net.netmask().to_string(),
+                    "exclusion",
+                );
             }
         } else {
             tracing::warn!("no physical IPv4 gateway found; entry servers may loop through the TUN");
@@ -303,6 +403,7 @@ impl TunRuntime {
             tunnel.clone(),
             cache.clone(),
             running.clone(),
+            config.dns,
             config.dns_upstream,
             gateway,
             direct_routes.clone(),
@@ -353,31 +454,54 @@ impl TunRuntime {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
+        // Do not leave a default gateway behind on the (persistent) adapter.
+        let _ = self.adapter.set_gateway(None);
         drop(self.session);
         drop(self.adapter);
         tracing::info!("TUN stopped");
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     mut listener: netstack_smoltcp::TcpListener,
     tunnel: Arc<Tunnel>,
     cache: Arc<DomainCache>,
     running: Arc<AtomicBool>,
+    dns: Ipv4Addr,
     dns_upstream: SocketAddr,
     gateway: Option<Ipv4Addr>,
     direct_routes: Arc<Mutex<HashSet<Ipv4Addr>>>,
 ) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_TUN_CONNECTIONS));
     while running.load(Ordering::Acquire) {
         let Some((stream, _local, remote)) = listener.next().await else {
             break;
+        };
+        if remote.is_ipv6() {
+            // IPv6 is routed into the TUN only to keep it from leaking; there
+            // is no IPv6 relay, so reset the connection immediately.
+            tracing::debug!("TUN: dropping IPv6 connection to {remote}");
+            drop(stream);
+            continue;
+        }
+        let permit = match slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::warn!("TUN: connection limit reached, dropping {remote}");
+                drop(stream);
+                continue;
+            }
         };
         let tunnel = tunnel.clone();
         let cache = cache.clone();
         let direct_routes = direct_routes.clone();
         tokio::spawn(async move {
-            if remote.port() == 53 {
-                if let Err(err) = dns_tcp(stream, dns_upstream).await {
+            let _permit = permit;
+            // Only the address we advertised as DNS is treated as DNS; port 53
+            // may legitimately host other services.
+            if remote.port() == 53 && remote.ip() == IpAddr::V4(dns) {
+                if let Err(err) = dns_tcp(stream, dns_upstream, &cache).await {
                     tracing::debug!("DNS/TCP: {err:#}");
                 }
                 return;
@@ -385,7 +509,14 @@ async fn accept_loop(
             let host = cache
                 .host_for(remote.ip())
                 .unwrap_or_else(|| remote.ip().to_string());
-            let decision = tunnel.route(&host);
+            // Entry servers must never be tunnelled: their HTTP polls carry the
+            // tunnel itself. Pinning can fail, so enforce it here as well.
+            let is_entry = tunnel.server_ips().iter().any(|ip| *ip == remote.ip());
+            let decision = if is_entry {
+                Decision::Direct
+            } else {
+                tunnel.route(&host)
+            };
             match decision {
                 Decision::Direct => {
                     if let IpAddr::V4(ip) = remote.ip() {
@@ -397,7 +528,7 @@ async fn accept_loop(
                             if seen.insert(ip) {
                                 let target = ip.to_string();
                                 let gw = gateway.to_string();
-                                let _ = run_route(&[
+                                if let Err(err) = run_route(&[
                                     "add".to_owned(),
                                     target,
                                     "mask".to_owned(),
@@ -405,7 +536,12 @@ async fn accept_loop(
                                     gw,
                                     "metric".to_owned(),
                                     "1".to_owned(),
-                                ]);
+                                ]) {
+                                    // The route may already exist from an
+                                    // earlier session; the direct connect
+                                    // below will still succeed.
+                                    tracing::debug!("direct route {ip}: {err:#}");
+                                }
                             }
                         }
                     }
@@ -585,41 +721,66 @@ async fn dns_query(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
 }
 
 async fn dns_tcp_query(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>> {
-    let mut stream = tokio::net::TcpStream::connect(upstream).await?;
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(upstream),
+    )
+    .await
+    .context("DNS/TCP connect timed out")??;
     let mut framed = Vec::with_capacity(query.len() + 2);
     framed.extend_from_slice(&(query.len() as u16).to_be_bytes());
     framed.extend_from_slice(query);
-    stream.write_all(&framed).await?;
+    tokio::time::timeout(Duration::from_secs(5), stream.write_all(&framed))
+        .await
+        .context("DNS/TCP write timed out")??;
     let mut len = [0u8; 2];
-    stream.read_exact(&mut len).await?;
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut len))
+        .await
+        .context("DNS/TCP read timed out")??;
     let size = u16::from_be_bytes(len) as usize;
+    if size == 0 {
+        anyhow::bail!("empty DNS response");
+    }
     let mut response = vec![0u8; size];
-    stream.read_exact(&mut response).await?;
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut response))
+        .await
+        .context("DNS/TCP read timed out")??;
     Ok(response)
 }
 
 async fn dns_tcp(
     mut stream: netstack_smoltcp::TcpStream,
     upstream: SocketAddr,
+    cache: &DomainCache,
 ) -> Result<()> {
-    let mut len = [0u8; 2];
-    stream.read_exact(&mut len).await?;
-    let size = u16::from_be_bytes(len) as usize;
-    if size > 65535 {
-        anyhow::bail!("DNS query too large");
-    }
-    let mut query = vec![0u8; size];
-    stream.read_exact(&mut query).await?;
-    let response = dns_tcp_query(&query, upstream).await?;
-    let mut framed = Vec::with_capacity(response.len() + 2);
-    framed.extend_from_slice(&(response.len() as u16).to_be_bytes());
-    framed.extend_from_slice(&response);
-    stream.write_all(&framed).await?;
-    stream.shutdown().await.ok();
-    Ok(())
+    tokio::time::timeout(Duration::from_secs(15), async move {
+        let mut len = [0u8; 2];
+        stream.read_exact(&mut len).await?;
+        let size = u16::from_be_bytes(len) as usize;
+        if size == 0 {
+            anyhow::bail!("empty DNS query");
+        }
+        let mut query = vec![0u8; size];
+        stream.read_exact(&mut query).await?;
+        let response = dns_tcp_query(&query, upstream).await?;
+        // DNS-over-TCP answers must teach the split-routing cache too.
+        learn_dns(&response, cache);
+        let mut framed = Vec::with_capacity(response.len() + 2);
+        framed.extend_from_slice(&(response.len() as u16).to_be_bytes());
+        framed.extend_from_slice(&response);
+        stream.write_all(&framed).await?;
+        stream.shutdown().await.ok();
+        Ok(())
+    })
+    .await
+    .context("DNS/TCP session timed out")?
 }
 
 fn learn_dns(packet: &[u8], cache: &DomainCache) {
+    if packet.len() < 12 || packet[2] & 0x80 == 0 || packet[3] & 0x0f != 0 {
+        // Not a successful response.
+        return;
+    }
     let Some((name, _)) = dns_question(packet) else {
         return;
     };
@@ -637,6 +798,12 @@ fn learn_dns(packet: &[u8], cache: &DomainCache) {
             return;
         }
         let typ = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
+        let ttl = u32::from_be_bytes([
+            packet[offset + 4],
+            packet[offset + 5],
+            packet[offset + 6],
+            packet[offset + 7],
+        ]);
         let rdlen = u16::from_be_bytes([packet[offset + 8], packet[offset + 9]]) as usize;
         offset += 10;
         if offset + rdlen > packet.len() {
@@ -647,6 +814,7 @@ fn learn_dns(packet: &[u8], cache: &DomainCache) {
             cache.insert(
                 IpAddr::V4(Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3])),
                 name.clone(),
+                if ttl == 0 { DNS_DEFAULT_TTL } else { ttl },
             );
         }
         offset += rdlen;
@@ -708,12 +876,12 @@ fn dns_name(packet: &[u8], start: usize) -> Option<(String, usize)> {
     None
 }
 
-fn physical_gateway() -> Option<Ipv4Addr> {
+fn physical_gateway(tun_address: Ipv4Addr) -> Option<Ipv4Addr> {
     wintun::get_active_network_interface_gateways()
         .ok()?
         .into_iter()
         .find_map(|ip| match ip {
-            IpAddr::V4(ip) if ip != Ipv4Addr::new(10, 7, 0, 1) => Some(ip),
+            IpAddr::V4(ip) if !ip.is_unspecified() && ip != tun_address => Some(ip),
             _ => None,
         })
 }
@@ -747,10 +915,37 @@ fn run_route(args: &[String]) -> Result<()> {
     }
     let text = String::from_utf8_lossy(&output.stderr);
     let text = text.trim();
+    let text = if text.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    } else {
+        text.to_owned()
+    };
     anyhow::bail!(
         "route.exe {} failed: {}",
         args.join(" "),
-        if text.is_empty() { "unknown error" } else { text }
+        if text.is_empty() { "unknown error" } else { &text }
+    )
+}
+
+fn run_netsh(args: &[&str]) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    let mut command = std::process::Command::new("netsh");
+    command.args(args).creation_flags(ROUTE_NO_WINDOW);
+    let output = command.output().context("cannot run netsh")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(&output.stderr);
+    let text = text.trim();
+    let text = if text.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    } else {
+        text.to_owned()
+    };
+    anyhow::bail!(
+        "netsh {} failed: {}",
+        args.join(" "),
+        if text.is_empty() { "unknown error" } else { &text }
     )
 }
 
@@ -825,4 +1020,88 @@ fn _assert_send_sync() {
     is_send_sync::<TunRuntime>();
 }
 
-use std::net::Ipv6Addr;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Settings;
+
+    fn push_name(out: &mut Vec<u8>, name: &str) {
+        for label in name.split('.').filter(|l| !l.is_empty()) {
+            out.push(label.len() as u8);
+            out.extend_from_slice(label.as_bytes());
+        }
+        out.push(0);
+    }
+
+    fn response(flags: u16, answers: &[(u32, [u8; 4])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0x12, 0x34]);
+        out.extend_from_slice(&flags.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // qdcount
+        out.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // nscount
+        out.extend_from_slice(&0u16.to_be_bytes()); // arcount
+        push_name(&mut out, "example.com");
+        out.extend_from_slice(&1u16.to_be_bytes()); // A
+        out.extend_from_slice(&1u16.to_be_bytes()); // IN
+        for (ttl, ip) in answers {
+            out.extend_from_slice(&[0xC0, 0x0C]); // pointer to the question name
+            out.extend_from_slice(&1u16.to_be_bytes());
+            out.extend_from_slice(&1u16.to_be_bytes());
+            out.extend_from_slice(&ttl.to_be_bytes());
+            out.extend_from_slice(&4u16.to_be_bytes());
+            out.extend_from_slice(ip);
+        }
+        out
+    }
+
+    #[test]
+    fn learns_a_records_from_responses() {
+        let cache = DomainCache::default();
+        let packet = response(0x8180, &[(60, [93, 184, 216, 34]), (0, [1, 2, 3, 4])]);
+        learn_dns(&packet, &cache);
+        assert_eq!(
+            cache.host_for("93.184.216.34".parse().unwrap()).as_deref(),
+            Some("example.com")
+        );
+        // ttl == 0 is replaced with a sane default instead of expiring at once.
+        assert!(cache.host_for("1.2.3.4".parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn ignores_non_successful_dns_packets() {
+        let cache = DomainCache::default();
+        learn_dns(&response(0x8183, &[(60, [1, 2, 3, 4])]), &cache);
+        learn_dns(&response(0x0100, &[(60, [1, 2, 3, 4])]), &cache);
+        assert!(cache.host_for("1.2.3.4".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn domain_cache_entries_expire() {
+        let cache = DomainCache::default();
+        let ip: IpAddr = "5.6.7.8".parse().unwrap();
+        cache
+            .inner
+            .lock()
+            .insert(ip, ("old.example".into(), Instant::now() - Duration::from_secs(1)));
+        assert!(cache.host_for(ip).is_none());
+        cache.insert(ip, "new.example".into(), 60);
+        assert_eq!(cache.host_for(ip).as_deref(), Some("new.example"));
+    }
+
+    #[test]
+    fn exclusions_accept_prefixes_and_addresses() {
+        let mut settings = Settings::default();
+        settings.tun_exclude = vec![
+            "10.0.0.0/8".into(),
+            "192.168.1.5".into(),
+            " 172.16.0.0/12 ".into(),
+            "not-an-ip".into(),
+        ];
+        let config = TunConfig::from_settings(&settings).expect("valid config");
+        assert_eq!(config.exclusions.len(), 3);
+        assert_eq!(config.exclusions[0].prefix_len(), 8);
+        assert_eq!(config.exclusions[1].prefix_len(), 32);
+        assert_eq!(config.exclusions[2].prefix_len(), 12);
+    }
+}
