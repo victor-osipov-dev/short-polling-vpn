@@ -56,6 +56,26 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
     let resolved = store.resolve(selected.as_ref())?;
     let socks = resolved.settings.socks_listen.clone();
     let control_addr = resolved.settings.control_listen.clone();
+    let mode = resolved.mode.clone();
+    let vpn_mode = mode.eq_ignore_ascii_case("vpn");
+
+    #[cfg(all(feature = "gui", windows))]
+    let tun_config = if vpn_mode {
+        if !crate::tun::is_elevated() {
+            anyhow::bail!(
+                "VPN mode requires Administrator rights; start the terminal as Administrator"
+            );
+        }
+        Some(crate::tun::TunConfig::from_settings(&resolved.settings)?)
+    } else {
+        None
+    };
+    #[cfg(not(all(feature = "gui", windows)))]
+    if vpn_mode {
+        anyhow::bail!(
+            "VPN mode is not available in this build; use the GUI build or switch the profile to Proxy mode"
+        );
+    }
 
     let tunnel = Tunnel::new(resolved, &dir.join("cache")).await?;
     let handle = tunnel.start();
@@ -86,6 +106,17 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
         })
     };
 
+    #[cfg(all(feature = "gui", windows))]
+    let mut tun = None;
+    #[cfg(all(feature = "gui", windows))]
+    if let Some(config) = tun_config {
+        let cache = Arc::new(crate::tun::DomainCache::default());
+        let runtime = crate::tun::TunRuntime::start(tunnel.clone(), config, cache, &dir)
+            .await
+            .context("cannot start VPN mode (run as Administrator)")?;
+        tun = Some(runtime);
+    }
+
     let state = StateFile {
         pid: std::process::id(),
         socks: actual_socks.clone(),
@@ -96,12 +127,24 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
     control::write_state(&dir, &state)?;
 
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &dir, &tunnel, &actual_socks, &actual_control).await;
+    let result = event_loop(
+        &mut terminal,
+        &dir,
+        &tunnel,
+        &actual_socks,
+        &actual_control,
+        if vpn_mode { "VPN (TUN)" } else { "proxy (SOCKS5)" },
+    )
+    .await;
     ratatui::restore();
 
     running.store(false, Ordering::Release);
     socks_task.abort();
     control_task.abort();
+    #[cfg(all(feature = "gui", windows))]
+    if let Some(tun) = tun.take() {
+        tun.stop().await;
+    }
     handle.stop().await;
     control::clear_state(&dir);
     result
@@ -239,6 +282,7 @@ async fn event_loop(
     tunnel: &Arc<Tunnel>,
     socks: &str,
     control_addr: &str,
+    mode: &str,
 ) -> Result<()> {
     let mut ui = Ui {
         tab: Tab::Status,
@@ -275,6 +319,7 @@ async fn event_loop(
                 &snapshot,
                 socks,
                 control_addr,
+                mode,
                 &logs,
                 rx_rate,
                 tx_rate,
@@ -320,12 +365,14 @@ async fn event_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw(
     frame: &mut Frame,
     ui: &Ui,
     snapshot: &crate::tunnel::Status,
     socks: &str,
     control: &str,
+    mode: &str,
     logs: &str,
     rx_rate: f64,
     tx_rate: f64,
@@ -357,7 +404,7 @@ fn draw(
             }),
         ),
         Span::raw(format!(
-            "  profile: {}  socks: {}  control: {}",
+            "  profile: {}  mode: {mode}  socks: {}  control: {}",
             snapshot.profile, socks, control
         )),
     ]);
@@ -622,7 +669,19 @@ mod tests {
     fn render(ui: &Ui, status: &Status, logs: &str) -> String {
         let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
         terminal
-            .draw(|frame| draw(frame, ui, status, "127.0.0.1:1080", "127.0.0.1:1081", logs, 1024.0, 0.0))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    ui,
+                    status,
+                    "127.0.0.1:1080",
+                    "127.0.0.1:1081",
+                    "proxy (SOCKS5)",
+                    logs,
+                    1024.0,
+                    0.0,
+                )
+            })
             .unwrap();
         terminal
             .backend()

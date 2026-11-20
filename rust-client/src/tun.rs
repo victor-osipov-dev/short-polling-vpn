@@ -173,6 +173,17 @@ impl Routes {
     /// is not fatal (IPv6 may already be disabled on the adapter).
     fn add_v6_blackhole(&mut self, prefix: &str) {
         let index = self.if_index.to_string();
+        // Drop a stale copy left by a crashed session; otherwise `add` would
+        // fail and we would not know to remove it on disconnect.
+        let _ = run_netsh(&[
+            "interface",
+            "ipv6",
+            "delete",
+            "route",
+            prefix,
+            &format!("interface={index}"),
+            "store=active",
+        ]);
         if let Err(err) = run_netsh(&[
             "interface",
             "ipv6",

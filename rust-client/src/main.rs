@@ -320,6 +320,8 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
         None => store.active_profile().cloned(),
     };
     let mut resolved = store.resolve(profile.as_ref())?;
+    let mode = resolved.mode.clone();
+    let vpn_mode = mode.eq_ignore_ascii_case("vpn");
     let socks = args
         .socks
         .clone()
@@ -329,6 +331,26 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
         .clone()
         .unwrap_or_else(|| resolved.settings.control_listen.clone());
     resolved.settings.socks_listen = socks.clone();
+
+    // Entry servers are resolved inside `Tunnel::new`, before the TUN routes
+    // exist, so the pinned addresses are usable for the /32 exclusions.
+    #[cfg(all(feature = "gui", windows))]
+    let tun_config = if vpn_mode {
+        if !spvpn::tun::is_elevated() {
+            anyhow::bail!(
+                "VPN mode requires Administrator rights; start the terminal as Administrator"
+            );
+        }
+        Some(spvpn::tun::TunConfig::from_settings(&resolved.settings)?)
+    } else {
+        None
+    };
+    #[cfg(not(all(feature = "gui", windows)))]
+    if vpn_mode {
+        anyhow::bail!(
+            "VPN mode is not available in this build; use the GUI build or switch the profile to Proxy mode"
+        );
+    }
 
     let tunnel = Tunnel::new(resolved, &dir.join("cache")).await?;
     let running = Arc::new(AtomicBool::new(true));
@@ -364,6 +386,18 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
         })
     };
 
+    #[cfg(all(feature = "gui", windows))]
+    let mut tun = None;
+    #[cfg(all(feature = "gui", windows))]
+    if let Some(config) = tun_config {
+        let cache = Arc::new(spvpn::tun::DomainCache::default());
+        let runtime = spvpn::tun::TunRuntime::start(tunnel.clone(), config, cache, dir)
+            .await
+            .context("cannot start VPN mode (run as Administrator)")?;
+        tracing::info!("mode: VPN via TUN {}", runtime.interface);
+        tun = Some(runtime);
+    }
+
     let state = StateFile {
         pid: std::process::id(),
         socks: actual_socks.clone(),
@@ -378,6 +412,10 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
     } else {
         println!("Short Polling VPN {} — connected", spvpn::VERSION);
         println!("  profile : {}", tunnel.profile_name);
+        println!(
+            "  mode    : {}",
+            if vpn_mode { "VPN (TUN)" } else { "Proxy (SOCKS5)" }
+        );
         println!("  SOCKS5  : {actual_socks}");
         println!("  control : {actual_control}");
         println!("  press Ctrl+C to stop");
@@ -392,6 +430,10 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
     running.store(false, Ordering::Release);
     socks_task.abort();
     control_task.abort();
+    #[cfg(all(feature = "gui", windows))]
+    if let Some(tun) = tun.take() {
+        tun.stop().await;
+    }
     handle.stop().await;
     control::clear_state(dir);
     Ok(())
