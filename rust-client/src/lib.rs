@@ -12,6 +12,13 @@ pub mod subscription;
 pub mod test_profile;
 pub mod tunnel;
 
+#[cfg(all(feature = "gui", windows))]
+pub mod gui;
+#[cfg(all(feature = "gui", windows))]
+pub mod platform;
+#[cfg(all(feature = "gui", windows))]
+pub mod tun;
+
 #[cfg(feature = "tui")]
 pub mod tui;
 

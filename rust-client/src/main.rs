@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 #[cfg(feature = "tui")]
@@ -31,6 +33,12 @@ struct Cli {
     /// Machine-readable JSON output
     #[arg(long, global = true)]
     json: bool,
+    /// Do not open the desktop window (use CLI/TUI instead)
+    #[arg(long, global = true)]
+    no_gui: bool,
+    /// Start the desktop app hidden in the system tray
+    #[arg(long, global = true)]
+    minimized: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -150,8 +158,55 @@ fn config_dir(cli: &Cli) -> PathBuf {
         })
 }
 
+/// Release builds use the Windows GUI subsystem so double-clicking the exe
+/// never flashes a console window. Attach to the parent terminal for CLI
+/// output, or allocate a console when a CLI command was started standalone.
+#[cfg(all(windows, not(debug_assertions)))]
+fn setup_console() {
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+        fn AllocConsole() -> i32;
+    }
+
+    let args: Vec<String> = std::env::args().collect();
+    let cli = args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "run"
+                | "profiles"
+                | "use"
+                | "subs"
+                | "test"
+                | "status"
+                | "stop"
+                | "config"
+                | "logs"
+                | "--no-gui"
+                | "--help"
+                | "-h"
+                | "--version"
+                | "-V"
+        )
+    });
+    if !cli {
+        return;
+    }
+    let attached = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0;
+    if !attached {
+        unsafe {
+            AllocConsole();
+        }
+    }
+}
+
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn setup_console() {}
+
 #[tokio::main]
 async fn main() {
+    setup_console();
     let cli = Cli::parse();
     let dir = config_dir(&cli);
     let result = run(cli, dir.clone()).await;
@@ -163,18 +218,27 @@ async fn main() {
 
 async fn run(cli: Cli, dir: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
+    #[cfg(all(feature = "gui", windows))]
+    let gui_mode = !cli.no_gui && cli.cmd.is_none();
+    #[cfg(not(all(feature = "gui", windows)))]
+    let gui_mode = false;
     #[cfg(feature = "tui")]
     let tui_mode = {
         let interactive = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
         match &cli.cmd {
-            None => interactive,
+            None => interactive && !gui_mode,
             Some(Cmd::Run(args)) => interactive && !args.no_tui,
             _ => false,
         }
     };
     #[cfg(not(feature = "tui"))]
     let tui_mode = false;
-    spvpn::logging::init(&dir, cli.verbose, !tui_mode);
+    spvpn::logging::init(&dir, cli.verbose, !tui_mode && !gui_mode);
+
+    #[cfg(all(feature = "gui", windows))]
+    if gui_mode {
+        return spvpn::gui::run(dir, cli.minimized);
+    }
 
     match cli.cmd {
         None => {

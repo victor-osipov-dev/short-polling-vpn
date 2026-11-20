@@ -179,13 +179,16 @@ pub struct Tunnel {
     running: AtomicBool,
     wake: Arc<Notify>,
     idle_logged: AtomicBool,
-    mode: String,
+    mode: Mutex<String>,
+    server_ips: Vec<IpAddr>,
 }
 
 impl Tunnel {
     pub async fn new(resolved: ResolvedProfile, cache_dir: &std::path::Path) -> Result<Arc<Self>> {
         let settings = &resolved.settings;
-        let http = build_client(settings)?;
+        // Pin entry-server addresses so tunnel bookkeeping never resolves
+        // through the TUN adapter (which would recurse into the tunnel).
+        let (http, server_ips) = build_client(settings, &resolved.urls).await?;
         if let Err(err) = crate::routing::refresh_rules(cache_dir, &resolved.split, &http).await {
             tracing::warn!("rules refresh failed: {err:#}");
         }
@@ -233,7 +236,8 @@ impl Tunnel {
             running: AtomicBool::new(false),
             wake: Arc::new(Notify::new()),
             idle_logged: AtomicBool::new(false),
-            mode: "proxy".into(),
+            mode: Mutex::new(resolved.mode.clone()),
+            server_ips,
         });
         tracing::info!(
             "tunnel ready: profile={:?} urls={} split={} user={}",
@@ -247,6 +251,29 @@ impl Tunnel {
 
     pub fn urls(&self) -> &[String] {
         &self.urls
+    }
+
+    /// IPv4 addresses of the entry servers; TUN mode keeps these on the
+    /// physical route so polls do not loop through the tunnel.
+    pub fn server_ips(&self) -> &[IpAddr] {
+        &self.server_ips
+    }
+
+    pub fn mode(&self) -> String {
+        self.mode.lock().clone()
+    }
+
+    pub fn set_mode(&self, mode: &str) {
+        *self.mode.lock() = mode.to_owned();
+    }
+
+    /// Clears quarantine/failure counters so every entry URL is tried again.
+    pub fn clear_failures(&self) {
+        self.failures.lock().clear();
+        self.cooldowns.lock().clear();
+        self.stats.last_error.lock().clear();
+        self.wake.notify_waiters();
+        tracing::info!("URL health counters cleared");
     }
 
     pub fn route(&self, host: &str) -> Decision {
@@ -914,7 +941,7 @@ impl Tunnel {
                 Some(epoch_millis().saturating_sub(last_poll))
             },
             split_enabled: self.router.split.enabled,
-            mode: self.mode.clone(),
+            mode: self.mode(),
             urls: self
                 .urls
                 .iter()
@@ -989,7 +1016,10 @@ pub struct Status {
     pub urls: Vec<UrlStatus>,
 }
 
-fn build_client(settings: &crate::store::Settings) -> Result<reqwest::Client> {
+async fn build_client(
+    settings: &crate::store::Settings,
+    urls: &[String],
+) -> Result<(reqwest::Client, Vec<IpAddr>)> {
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .connect_timeout(Duration::from_secs(4))
@@ -1002,7 +1032,47 @@ fn build_client(settings: &crate::store::Settings) -> Result<reqwest::Client> {
     if !settings.http2 {
         builder = builder.http1_only();
     }
-    Ok(builder.build().context("cannot build HTTP client")?)
+
+    let mut pinned: HashMap<String, std::net::SocketAddr> = HashMap::new();
+    let mut ips = Vec::new();
+    for raw in urls {
+        let Ok(parsed) = url::Url::parse(raw) else {
+            continue;
+        };
+        let Some(host) = parsed.host_str() else {
+            continue;
+        };
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if !ips.contains(&ip) {
+                ips.push(ip);
+            }
+            continue;
+        }
+        if pinned.contains_key(host) {
+            continue;
+        }
+        let deadline = Duration::from_secs(6);
+        let lookup = tokio::time::timeout(deadline, tokio::net::lookup_host((host, port))).await;
+        let Ok(Ok(addrs)) = lookup else {
+            tracing::warn!("cannot pin entry server {host}:{port}");
+            continue;
+        };
+        // Prefer IPv4 for TUN exclusion routes; IPv6 is still usable in
+        // proxy mode, but Windows route management here is IPv4-only.
+        let chosen = addrs.into_iter().find(|addr| addr.is_ipv4());
+        if let Some(addr) = chosen {
+            pinned.insert(host.to_owned(), addr);
+            if !ips.contains(&addr.ip()) {
+                ips.push(addr.ip());
+            }
+        }
+    }
+    for (host, addr) in pinned {
+        builder = builder.resolve(&host, addr);
+    }
+    let client = builder.build().context("cannot build HTTP client")?;
+    Ok((client, ips))
 }
 
 fn now_secs() -> i64 {

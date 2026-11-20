@@ -43,6 +43,27 @@ pub struct Settings {
     /// Split-routing list overrides; empty means "use subscription values".
     pub geoip_url: Option<String>,
     pub domains_url: Option<String>,
+
+    // Desktop UI state.
+    /// `ru` or `en`.
+    pub ui_language: String,
+    pub ui_autostart: bool,
+    pub ui_close_to_tray: bool,
+    pub ui_start_minimized: bool,
+    /// Automatically point the Windows system proxy at the local SOCKS5 port.
+    pub system_proxy: bool,
+    /// Mode used by the manual profile: `proxy` or `vpn`.
+    pub manual_mode: String,
+
+    // Native TUN (VPN) mode.
+    pub tun_address: String,
+    pub tun_netmask: String,
+    pub tun_dns: String,
+    pub tun_mtu: usize,
+    /// DNS used by the built-in resolver (`ip:port`, UDP).
+    pub tun_dns_upstream: String,
+    /// Additional IPv4 destinations that must bypass the tunnel.
+    pub tun_exclude: Vec<String>,
 }
 
 impl Default for Settings {
@@ -72,6 +93,18 @@ impl Default for Settings {
             check_url: "https://www.cloudflare.com/cdn-cgi/trace".into(),
             geoip_url: None,
             domains_url: None,
+            ui_language: "ru".into(),
+            ui_autostart: false,
+            ui_close_to_tray: true,
+            ui_start_minimized: false,
+            system_proxy: true,
+            manual_mode: "proxy".into(),
+            tun_address: "10.7.0.1".into(),
+            tun_netmask: "255.255.255.0".into(),
+            tun_dns: "10.7.0.53".into(),
+            tun_mtu: 1400,
+            tun_dns_upstream: "1.1.1.1:53".into(),
+            tun_exclude: Vec::new(),
         }
     }
 }
@@ -432,6 +465,8 @@ pub fn subscription_name(raw: &Value, source: &str) -> String {
 #[derive(Clone)]
 pub struct ResolvedProfile {
     pub name: String,
+    /// `proxy` or `vpn`.
+    pub mode: String,
     pub settings: Settings,
     pub keys: Keys,
     pub user_id: Option<String>,
@@ -446,6 +481,7 @@ impl ResolvedProfile {
     fn base(store: &Store, name: String, settings: Settings) -> Self {
         Self {
             name,
+            mode: "proxy".into(),
             settings,
             // Replaced below once the key source is known.
             keys: Keys::from_psk_b64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
@@ -466,6 +502,11 @@ impl ResolvedProfile {
             .clone()
             .context("manual mode requires a PSK: spvpn config set psk <base64>")?;
         let mut resolved = Self::base(store, "Manual".into(), settings);
+        resolved.mode = if store.settings.manual_mode.eq_ignore_ascii_case("vpn") {
+            "vpn".into()
+        } else {
+            "proxy".into()
+        };
         resolved.keys = Keys::from_psk_b64(&psk)?;
         resolved.urls = dedup_urls(&resolved.settings.server_urls);
         resolved.nodes = resolved
@@ -537,6 +578,13 @@ impl ResolvedProfile {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| subscription_name(&sub.raw, &sub.source));
         let mut resolved = Self::base(store, name, settings.clone());
+        if let Some(profile) = profile {
+            resolved.mode = if profile.mode.eq_ignore_ascii_case("vpn") {
+                "vpn".into()
+            } else {
+                "proxy".into()
+            };
+        }
 
         // Per-user auth from the subscription.
         if let Ok(user) = serde_json::from_value::<UserDef>(
