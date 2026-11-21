@@ -459,6 +459,16 @@ fun HomeScreen(
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
             )
+            val activeTest = active?.id?.let { ProfileTester.results[it] }
+            if (activeTest != null && activeTest.ok == true && activeTest.latencyMs > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${activeTest.latencyMs} ms",
+                    color = Color(0xFF7BE495),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
 
             Spacer(Modifier.height(30.dp))
             SubscriptionCard(

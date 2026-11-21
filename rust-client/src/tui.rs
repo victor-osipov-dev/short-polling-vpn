@@ -487,9 +487,9 @@ fn draw_status(
             ),
         ]),
         Line::from(vec![
-            Span::styled("last poll   ", Style::default().fg(Color::DarkGray)),
-            Span::raw(match snapshot.last_poll_age_ms {
-                Some(ms) => format!("{ms} ms ago"),
+            Span::styled("avg latency ", Style::default().fg(Color::DarkGray)),
+            Span::raw(match snapshot.avg_latency_ms {
+                Some(ms) => format!("{ms} ms"),
                 None => "-".into(),
             }),
         ]),
@@ -649,6 +649,7 @@ mod tests {
             rx_bytes: 2 * 1024 * 1024,
             last_error: Some("HTTP 502".into()),
             last_poll_age_ms: Some(120),
+            avg_latency_ms: Some(34),
             split_enabled: true,
             mode: "socks".into(),
             urls: vec![

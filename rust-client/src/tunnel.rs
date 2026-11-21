@@ -53,6 +53,9 @@ pub struct Stats {
     pub opened: AtomicU64,
     pub closed: AtomicU64,
     pub last_poll_ms: AtomicU64,
+    /// Sum and count of successful poll durations, used for average latency.
+    pub poll_latency_sum_ms: AtomicU64,
+    pub poll_latency_samples: AtomicU64,
     pub last_error: Mutex<String>,
 }
 
@@ -68,7 +71,20 @@ impl Stats {
             opened: AtomicU64::new(0),
             closed: AtomicU64::new(0),
             last_poll_ms: AtomicU64::new(0),
+            poll_latency_sum_ms: AtomicU64::new(0),
+            poll_latency_samples: AtomicU64::new(0),
             last_error: Mutex::new(String::new()),
+        }
+    }
+
+    fn avg_poll_latency_ms(&self) -> Option<u64> {
+        let samples = self.poll_latency_samples.load(Ordering::Relaxed);
+        if samples == 0 {
+            None
+        } else {
+            Some(
+                self.poll_latency_sum_ms.load(Ordering::Relaxed) / samples,
+            )
         }
     }
 }
@@ -742,6 +758,13 @@ impl Tunnel {
         }
 
         let got_data = self.consume_response(resp).await?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        self.stats
+            .poll_latency_sum_ms
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
+        self.stats
+            .poll_latency_samples
+            .fetch_add(1, Ordering::Relaxed);
         let rx = self.stats.rx_bytes.load(Ordering::Relaxed) - rx_before;
         tracing::debug!(
             "poll {} {:?}: {} ms, up {} frame(s)/{} B, down {} B",
@@ -963,6 +986,7 @@ impl Tunnel {
             } else {
                 Some(epoch_millis().saturating_sub(last_poll))
             },
+            avg_latency_ms: self.stats.avg_poll_latency_ms(),
             split_enabled: self.router.split.enabled,
             mode: self.mode(),
             urls: self
@@ -1034,6 +1058,8 @@ pub struct Status {
     pub rx_bytes: u64,
     pub last_error: Option<String>,
     pub last_poll_age_ms: Option<u64>,
+    /// Average successful poll round-trip, in milliseconds.
+    pub avg_latency_ms: Option<u64>,
     pub split_enabled: bool,
     pub mode: String,
     pub urls: Vec<UrlStatus>,

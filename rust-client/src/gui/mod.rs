@@ -679,20 +679,22 @@ impl App {
 
     fn stats(&self, ui: &mut egui::Ui, status: &crate::tunnel::Status, shared: &SharedState) {
         theme::card_ui(ui, |ui| {
-            ui.horizontal(|ui| {
-                self.stat(ui, self.tr("Сессии", "Sessions"), &status.active_sessions.to_string());
-                ui.separator();
+            ui.columns(4, |cols| {
                 self.stat(
-                    ui,
+                    &mut cols[0],
+                    self.tr("Сессии", "Sessions"),
+                    &status.active_sessions.to_string(),
+                );
+                self.stat(
+                    &mut cols[1],
                     self.tr("Задержка", "Latency"),
                     &status
-                        .last_poll_age_ms
+                        .avg_latency_ms
                         .map(|ms| format!("{ms} ms"))
                         .unwrap_or_else(|| "—".into()),
                 );
-                ui.separator();
                 self.stat(
-                    ui,
+                    &mut cols[2],
                     self.tr("Трафик", "Traffic"),
                     &format!(
                         "↑{}  ↓{}",
@@ -700,9 +702,8 @@ impl App {
                         human_bytes(status.rx_bytes)
                     ),
                 );
-                ui.separator();
                 self.stat(
-                    ui,
+                    &mut cols[3],
                     self.tr("Время", "Uptime"),
                     &format_duration(status.uptime_s),
                 );
@@ -723,7 +724,7 @@ impl App {
     }
 
     fn stat(&self, ui: &mut egui::Ui, label: &str, value: &str) {
-        ui.vertical(|ui| {
+        ui.vertical_centered(|ui| {
             ui.label(egui::RichText::new(value).size(14.0).strong());
             theme::hint(ui, label);
         });
