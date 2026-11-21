@@ -3141,6 +3141,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "httpdate",
+ "image",
  "ipnet",
  "netstack-smoltcp",
  "parking_lot",

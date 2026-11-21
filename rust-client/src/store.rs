@@ -226,6 +226,37 @@ impl Store {
         !self.settings.server_urls.is_empty()
     }
 
+    /// Route names declared by the subscriptions, including legacy
+    /// `profiles[].routes`, in subscription order and without duplicates.
+    pub fn route_names(&self) -> Vec<String> {
+        fn push_name(names: &mut Vec<String>, item: &Value) {
+            if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                let name = name.trim();
+                if !name.is_empty() && !names.iter().any(|known| known == name) {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        let mut names: Vec<String> = Vec::new();
+        for sub in &self.subscriptions {
+            if let Some(routes) = sub.raw.get("routes").and_then(|v| v.as_array()) {
+                for route in routes {
+                    push_name(&mut names, route);
+                }
+            }
+            if let Some(profiles) = sub.raw.get("profiles").and_then(|v| v.as_array()) {
+                for profile in profiles {
+                    if let Some(routes) = profile.get("routes").and_then(|v| v.as_array()) {
+                        for route in routes {
+                            push_name(&mut names, route);
+                        }
+                    }
+                }
+            }
+        }
+        names
+    }
+
     /// Removes a subscription together with its derived profiles.
     pub fn remove_subscription(&mut self, needle: &str) -> bool {
         let before = self.subscriptions.len();

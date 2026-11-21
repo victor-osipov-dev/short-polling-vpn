@@ -82,35 +82,6 @@ impl Tray {
 }
 
 pub fn app_icon() -> Icon {
-    let size = 32usize;
-    let mut rgba = vec![0u8; size * size * 4];
-    for y in 0..size {
-        for x in 0..size {
-            let i = (y * size + x) * 4;
-            let edge = x < 2 || y < 2 || x >= size - 2 || y >= size - 2;
-            let (r, g, b) = if edge {
-                (10, 13, 18)
-            } else if (x as i32 - 16).abs() + (y as i32 - 16).abs() < 12 {
-                (77, 163, 255)
-            } else {
-                (22, 30, 42)
-            };
-            rgba[i] = r;
-            rgba[i + 1] = g;
-            rgba[i + 2] = b;
-            rgba[i + 3] = if edge { 255 } else { 245 };
-        }
-    }
-    // White keyhole / lock body.
-    for y in 12..24 {
-        for x in 11..21 {
-            if (y < 16 && (x < 13 || x > 18)) || (y > 15 && y < 22) {
-                let i = (y * size + x) * 4;
-                rgba[i] = 235;
-                rgba[i + 1] = 242;
-                rgba[i + 2] = 250;
-            }
-        }
-    }
-    Icon::from_rgba(rgba, size as u32, size as u32).expect("valid icon")
+    let size = 32u32;
+    Icon::from_rgba(super::icon_rgba(size), size, size).expect("valid icon")
 }

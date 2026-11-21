@@ -51,6 +51,7 @@ crossterm = { version = "0.28", optional = true }
 # Desktop GUI and native TUN (Windows).
 eframe = { version = "0.37", optional = true, default-features = false, features = ["glow", "default_fonts"] }
 tray-icon = { version = "0.25", optional = true, default-features = false }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 netstack-smoltcp = { version = "0.2.5", optional = true }
 wintun = { version = "0.5.1", optional = true }
 windows-sys = { version = "0.61", optional = true, features = [
@@ -71,6 +72,7 @@ tui = ["dep:ratatui", "dep:crossterm"]
 gui = [
     "dep:eframe",
     "dep:tray-icon",
+    "dep:image",
     "dep:netstack-smoltcp",
     "dep:wintun",
     "dep:windows-sys",

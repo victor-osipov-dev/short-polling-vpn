@@ -29,6 +29,10 @@ enum Page {
     Logs,
 }
 
+/// Maximum width of the centered content column. Every card fills it, so the
+/// blocks share one width and do not stretch across a wide window.
+const CONTENT_WIDTH: f32 = 560.0;
+
 pub fn run(dir: PathBuf, minimized: bool) -> Result<()> {
     let minimized = minimized
         || Store::load(&dir)
@@ -40,9 +44,9 @@ pub fn run(dir: PathBuf, minimized: bool) -> Result<()> {
             .with_min_inner_size([390.0, 560.0])
             .with_title("SPVPN")
             .with_icon(egui::IconData {
-                rgba: icon_rgba(),
-                width: 32,
-                height: 32,
+                rgba: icon_rgba(64),
+                width: 64,
+                height: 64,
             })
             .with_visible(!minimized),
         ..Default::default()
@@ -69,8 +73,9 @@ struct App {
     add_open: bool,
     new_sub: String,
     new_sub_name: String,
-    profile_test_busy: Option<String>,
     store_revision: u64,
+    refresh_at: Instant,
+    was_busy: bool,
     quitting: bool,
     hidden: bool,
     tray_tooltip_at: Instant,
@@ -120,8 +125,9 @@ impl App {
             add_open: false,
             new_sub: String::new(),
             new_sub_name: String::new(),
-            profile_test_busy: None,
             store_revision: 0,
+            refresh_at: Instant::now() - Duration::from_secs(2),
+            was_busy: false,
             quitting: false,
             hidden: minimized,
             tray_tooltip_at: Instant::now(),
@@ -245,9 +251,7 @@ impl App {
         } else {
             return;
         };
-        if self.backend.test_profiles(profiles, target) {
-            self.profile_test_busy = Some(if all { "all".into() } else { one.unwrap_or("").into() });
-        }
+        self.backend.test_profiles(profiles, target);
     }
 
     fn refresh_logs(&mut self, force: bool) {
@@ -413,6 +417,7 @@ impl App {
             .corner_radius(18)
             .inner_margin(egui::Margin::symmetric(18, 16))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     let color = if running { theme::GREEN } else { theme::MUTED };
                     theme::pill(
@@ -552,7 +557,7 @@ impl App {
     }
 
     fn stats(&self, ui: &mut egui::Ui, status: &crate::tunnel::Status, shared: &SharedState) {
-        theme::card().show(ui, |ui| {
+        theme::card_ui(ui, |ui| {
             ui.horizontal(|ui| {
                 self.stat(ui, self.tr("Сессии", "Sessions"), &status.active_sessions.to_string());
                 ui.separator();
@@ -615,13 +620,14 @@ impl App {
                 }
                 if ui.button(self.tr("Тест всех", "Test all")).clicked() {
                     self.test_profiles(true, None);
+                    ui.ctx().request_repaint();
                 }
             });
         });
         ui.add_space(4.0);
 
         if self.add_open {
-            theme::card().show(ui, |ui| {
+            theme::card_ui(ui, |ui| {
                 ui.label(egui::RichText::new(self.tr("Новая подписка", "New subscription")).strong());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_sub)
@@ -664,7 +670,10 @@ impl App {
             .iter()
             .map(|s| (s.id.clone(), s.name.clone(), s.source.clone()))
             .collect();
-        let tests = self.shared.lock().tests.clone();
+        let (tests, pending) = {
+            let shared = self.shared.lock();
+            (shared.tests.clone(), shared.test_pending.clone())
+        };
         let mut select: Option<String> = None;
         let mut test: Option<String> = None;
         let mut remove: Option<String> = None;
@@ -694,7 +703,17 @@ impl App {
                 theme::hint(ui, self.tr("Нет профилей", "No profiles"));
             }
             for (id, name) in rows {
-                self.profile_row(ui, &id, &name, &active, &tests, &mut select, &mut test);
+                self.profile_row(
+                    ui,
+                    &id,
+                    &name,
+                    &name,
+                    &active,
+                    &tests,
+                    &pending,
+                    &mut select,
+                    &mut test,
+                );
             }
         }
 
@@ -705,8 +724,10 @@ impl App {
                 ui,
                 MANUAL_PROFILE_ID,
                 self.tr("Ручной профиль", "Manual profile"),
+                "Manual",
                 &active,
                 &tests,
+                &pending,
                 &mut select,
                 &mut test,
             );
@@ -728,6 +749,7 @@ impl App {
         }
         if let Some(id) = test {
             self.test_profiles(false, Some(&id));
+            ui.ctx().request_repaint();
         }
         if let Some(id) = remove {
             self.store.remove_subscription(&id);
@@ -740,12 +762,15 @@ impl App {
         ui: &mut egui::Ui,
         id: &str,
         name: &str,
+        test_key: &str,
         active: &str,
         tests: &[TestResult],
+        pending: &[String],
         select: &mut Option<String>,
         test: &mut Option<String>,
     ) {
-        let result = tests.iter().find(|r| r.profile == name);
+        let checking = pending.iter().any(|item| item == test_key);
+        let result = tests.iter().find(|r| r.profile == test_key);
         egui::Frame::NONE
             .fill(if id == active {
                 theme::ACCENT.gamma_multiply(0.08)
@@ -759,6 +784,7 @@ impl App {
             .corner_radius(12)
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     if ui.radio(id == active, "").clicked() {
                         *select = Some(id.to_owned());
@@ -768,7 +794,10 @@ impl App {
                         if ui.small_button(self.tr("Тест", "Test")).clicked() {
                             *test = Some(id.to_owned());
                         }
-                        if let Some(result) = result {
+                        if checking {
+                            ui.add(egui::Spinner::new().size(12.0));
+                            theme::pill(ui, self.tr("Проверка…", "Checking…"), theme::ACCENT);
+                        } else if let Some(result) = result {
                             if result.ok {
                                 theme::pill(
                                     ui,
@@ -781,11 +810,13 @@ impl App {
                         }
                     });
                 });
-                if let Some(result) = result {
-                    if !result.ok {
-                        theme::hint(ui, &result.error);
-                    } else if !result.exit_ip.is_empty() {
-                        theme::hint(ui, &format!("exit {}", result.exit_ip));
+                if !checking {
+                    if let Some(result) = result {
+                        if !result.ok {
+                            theme::hint(ui, &result.error);
+                        } else if !result.exit_ip.is_empty() {
+                            theme::hint(ui, &format!("exit {}", result.exit_ip));
+                        }
                     }
                 }
             });
@@ -795,7 +826,7 @@ impl App {
     fn settings(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
         theme::section_title(ui, self.tr("Интерфейс", "Interface"));
-        theme::card().show(ui, |ui| {
+        theme::card_ui(ui, |ui| {
             egui::Grid::new("ui_settings")
                 .num_columns(2)
                 .spacing([12.0, 8.0])
@@ -841,7 +872,7 @@ impl App {
 
         ui.add_space(10.0);
         theme::section_title(ui, self.tr("Соединение", "Connection"));
-        theme::card().show(ui, |ui| {
+        theme::card_ui(ui, |ui| {
             egui::Grid::new("conn_settings")
                 .num_columns(2)
                 .spacing([12.0, 8.0])
@@ -936,7 +967,7 @@ impl App {
 
         ui.add_space(10.0);
         theme::section_title(ui, "VPN (TUN)");
-        theme::card().show(ui, |ui| {
+        theme::card_ui(ui, |ui| {
             let admin = platform::is_elevated();
             ui.horizontal(|ui| {
                 theme::pill(
@@ -1031,7 +1062,7 @@ impl App {
 
         ui.add_space(10.0);
         theme::section_title(ui, self.tr("Подписки", "Subscriptions"));
-        theme::card().show(ui, |ui| {
+        theme::card_ui(ui, |ui| {
             if self.store.subscriptions.is_empty() {
                 theme::hint(ui, self.tr("Подписок пока нет.", "No subscriptions yet."));
             }
@@ -1081,6 +1112,9 @@ impl App {
             "The active profile does not use a subscription",
         );
         let split_label = self.tr("Разделять трафик", "Split traffic");
+        let inherit = self.tr("Наследовать", "Inherit");
+        let direct = self.tr("Напрямую", "Direct");
+        let routes = self.store.route_names();
         theme::section_title(ui, title);
         display_split(ui, &self.store, no_profile, changed);
 
@@ -1089,7 +1123,7 @@ impl App {
         let active_id = self.store.active.clone();
         if let Some(id) = active_id {
             if let Some(profile) = self.store.profiles.iter_mut().find(|p| p.id == id) {
-                theme::card().show(ui, |ui| {
+                theme::card_ui(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(split_label);
                         let mut split = profile.split.unwrap_or(false);
@@ -1108,22 +1142,43 @@ impl App {
                                 ("Private", &mut profile.route_private),
                             ] {
                                 ui.label(label);
-                                let mut value = field.clone().unwrap_or_default();
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut value)
-                                            .hint_text("inherit / direct / route")
-                                            .desired_width(220.0),
-                                    )
-                                    .changed()
-                                {
-                                    *field = (!value.trim().is_empty()).then_some(value);
-                                    *changed = true;
+                                let mut options: Vec<String> = vec!["direct".to_owned()];
+                                options.extend(routes.iter().cloned());
+                                if let Some(current) = field.as_deref() {
+                                    if !options.iter().any(|option| option == current) {
+                                        options.push(current.to_owned());
+                                    }
                                 }
+                                egui::ComboBox::from_id_salt(("split_route", label))
+                                    .selected_text(field.as_deref().unwrap_or(inherit))
+                                    .width(220.0)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(field.is_none(), inherit)
+                                            .clicked()
+                                        {
+                                            *field = None;
+                                            *changed = true;
+                                        }
+                                        for option in &options {
+                                            let selected =
+                                                field.as_deref() == Some(option.as_str());
+                                            let text = if option == "direct" {
+                                                direct
+                                            } else {
+                                                option.as_str()
+                                            };
+                                            if ui.selectable_label(selected, text).clicked() {
+                                                *field = Some(option.clone());
+                                                *changed = true;
+                                            }
+                                        }
+                                    });
                                 ui.end_row();
                             }
                         });
                 });
+
             }
         }
     }
@@ -1137,7 +1192,7 @@ impl App {
             .as_ref()
             .map(|s| s.urls.clone())
             .unwrap_or_default();
-        theme::card().show(ui, |ui| {
+        theme::card_ui(ui, |ui| {
             if statuses.is_empty() {
                 theme::hint(
                     ui,
@@ -1217,7 +1272,7 @@ fn display_split(
     no_profile: &str,
     _changed: &mut bool,
 ) {
-    theme::card().show(ui, |ui| {
+    theme::card_ui(ui, |ui| {
         let resolved = store
             .active_profile()
             .and_then(|p| store.resolve(Some(p)).ok());
@@ -1269,7 +1324,24 @@ impl eframe::App for App {
     /// Runs even while the window is hidden, so tray menus and background
     /// session state keep working in the tray.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.backend.refresh();
+        // Copying the tunnel snapshot is the only thing that makes the latency
+        // change, so it must not run on every mouse-driven repaint. One tick
+        // per second is enough; while connecting, poll faster so the state
+        // switch is not delayed.
+        let busy = {
+            let shared = self.shared.lock();
+            shared.busy || shared.test_busy
+        };
+        let interval = if busy {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(1)
+        };
+        if busy != self.was_busy || self.refresh_at.elapsed() >= interval {
+            self.backend.refresh();
+            self.refresh_at = Instant::now();
+        }
+        self.was_busy = busy;
         self.apply_store_revision();
 
         let running = self.shared.lock().running;
@@ -1294,10 +1366,6 @@ impl eframe::App for App {
                 _ => self.toast(notice),
             }
         }
-
-        if !self.shared.lock().test_busy {
-            self.profile_test_busy = None;
-        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1316,8 +1384,20 @@ impl eframe::App for App {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.page {
-                        Page::Home => self.home(ui),
-                        Page::Settings => self.settings(ui),
+                        Page::Home | Page::Settings => {
+                            let width = CONTENT_WIDTH.min(ui.available_width());
+                            let side = ((ui.available_width() - width) * 0.5).max(0.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(side);
+                                ui.vertical(|ui| {
+                                    ui.set_width(width);
+                                    match self.page {
+                                        Page::Home => self.home(ui),
+                                        _ => self.settings(ui),
+                                    }
+                                });
+                            });
+                        }
                         Page::Logs => self.logs_page(ui),
                     });
             });
@@ -1389,25 +1469,25 @@ fn short_url(url: &str) -> String {
     }
 }
 
-fn icon_rgba() -> Vec<u8> {
-    let size = 32usize;
-    let mut rgba = vec![0u8; size * size * 4];
-    for y in 0..size {
-        for x in 0..size {
-            let i = (y * size + x) * 4;
-            let edge = x < 2 || y < 2 || x >= size - 2 || y >= size - 2;
-            let (r, g, b) = if edge {
-                (10, 13, 18)
-            } else if (x as i32 - 16).abs() + (y as i32 - 16).abs() < 12 {
-                (77, 163, 255)
-            } else {
-                (22, 30, 42)
-            };
-            rgba[i] = r;
-            rgba[i + 1] = g;
-            rgba[i + 2] = b;
-            rgba[i + 3] = 255;
+fn icon_rgba(size: u32) -> Vec<u8> {
+    const ICON_PNG: &[u8] = include_bytes!("../../assets/icon.png");
+    if let Ok(image) = image::load_from_memory(ICON_PNG) {
+        let rgba = image.to_rgba8();
+        if rgba.width() == size && rgba.height() == size {
+            return rgba.into_raw();
         }
+        return image::imageops::resize(
+            &rgba,
+            size,
+            size,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .into_raw();
+    }
+    // Fallback so the window still opens if the asset is unreadable.
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[77, 163, 255, 255]);
     }
     rgba
 }

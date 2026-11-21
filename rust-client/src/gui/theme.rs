@@ -74,6 +74,15 @@ pub fn card() -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(14, 12))
 }
 
+/// A card that always fills the current content column, so every block in a
+/// page has the same width.
+pub fn card_ui(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    card().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        add(ui);
+    });
+}
+
 pub fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
     ui.label(

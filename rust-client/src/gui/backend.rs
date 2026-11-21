@@ -31,6 +31,10 @@ pub struct SharedState {
     pub tun_active: bool,
     pub status: Option<Status>,
     pub test_busy: bool,
+    /// Profile names that are currently being tested. Kept separately from
+    /// `tests` so the UI can show a per-row "checking" state without dropping
+    /// results that were already collected for other profiles.
+    pub test_pending: Vec<String>,
     pub tests: Vec<TestResult>,
     pub exit_ip: String,
     pub store_revision: u64,
@@ -202,13 +206,18 @@ impl Backend {
         if profiles.is_empty() {
             return false;
         }
+        let names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
         {
             let mut shared = self.shared.lock();
-            if shared.test_busy {
-                return false;
+            // Only the profiles being tested lose their old result; results of
+            // all other profiles stay on screen.
+            shared.tests.retain(|test| !names.contains(&test.profile));
+            for name in &names {
+                if !shared.test_pending.contains(name) {
+                    shared.test_pending.push(name.clone());
+                }
             }
             shared.test_busy = true;
-            shared.tests.clear();
         }
         let shared = self.shared.clone();
         let cache = self.dir.join("cache");
@@ -224,11 +233,17 @@ impl Backend {
                     if result.ok && state.exit_ip.is_empty() {
                         state.exit_ip = result.exit_ip.clone();
                     }
+                    state.tests.retain(|test| test.profile != result.profile);
+                    state.test_pending.retain(|name| name != &result.profile);
                     state.tests.push(result);
                 },
             )
             .await;
-            shared.lock().test_busy = false;
+            let mut state = shared.lock();
+            for name in &names {
+                state.test_pending.retain(|pending| pending != name);
+            }
+            state.test_busy = !state.test_pending.is_empty();
         });
         true
     }

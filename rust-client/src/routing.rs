@@ -49,15 +49,21 @@ impl Category {
 pub struct Ruleset {
     pub ru_nets: Vec<IpNet>,
     pub private_nets: Vec<IpNet>,
-    pub ru_domains: Vec<String>,
-    pub direct_domains: Vec<String>,
+    pub ru_domains: HashSet<String>,
+    /// Domains from the RKN blocklist. They are unreachable from Russian
+    /// addresses, so they always go through the VPN exit even when the name
+    /// matches a Russian suffix.
+    pub blocked_domains: HashSet<String>,
+    pub direct_domains: HashSet<String>,
 }
 
 impl Ruleset {
     pub fn load(cache_dir: &Path, split: &SplitConfig) -> Self {
         let mut ru_nets = Vec::new();
-        let mut ru_domains: Vec<String> = DEFAULT_RU_SUFFIXES.iter().map(|s| s.to_string()).collect();
-        let mut direct_domains: Vec<String> =
+        let mut ru_domains: HashSet<String> =
+            DEFAULT_RU_SUFFIXES.iter().map(|s| s.to_string()).collect();
+        let mut blocked_domains = HashSet::new();
+        let mut direct_domains: HashSet<String> =
             DEFAULT_DIRECT_DOMAINS.iter().map(|s| s.to_string()).collect();
 
         if let Some(path) = cache_path(cache_dir, &split.rules.geoip) {
@@ -65,9 +71,12 @@ impl Ruleset {
                 ru_nets = parse_cidrs(&text);
             }
         }
+        // `rules.domains` points at Re:filter's `domains_all.lst`, i.e. the RKN
+        // blocklist. It lists sites that require a foreign exit, not Russian
+        // sites, so it must not feed `ru_domains`.
         if let Some(path) = cache_path(cache_dir, &split.rules.domains) {
             if let Ok(text) = std::fs::read_to_string(path) {
-                ru_domains.extend(parse_domains(&text));
+                blocked_domains.extend(parse_domains(&text));
             }
         }
         ru_domains.extend(split.rules.ru_domains.iter().map(|d| d.to_lowercase()));
@@ -88,16 +97,24 @@ impl Ruleset {
         Self {
             ru_nets,
             private_nets,
-            ru_domains: dedup(ru_domains),
-            direct_domains: dedup(direct_domains),
+            ru_domains,
+            blocked_domains,
+            direct_domains,
         }
     }
 
-    fn matches_domain(host: &str, domains: &[String]) -> bool {
+    fn matches_domain(host: &str, domains: &HashSet<String>) -> bool {
         let host = host.trim_end_matches('.').to_lowercase();
-        domains
-            .iter()
-            .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+        let mut name = host.as_str();
+        loop {
+            if domains.contains(name) {
+                return true;
+            }
+            match name.find('.') {
+                Some(pos) => name = &name[pos + 1..],
+                None => return false,
+            }
+        }
     }
 
     pub fn classify(&self, host: &str) -> Category {
@@ -125,21 +142,14 @@ impl Ruleset {
         if Self::matches_domain(&host, &self.direct_domains) {
             return Category::Private;
         }
+        if Self::matches_domain(&host, &self.blocked_domains) {
+            return Category::NonRu;
+        }
         if Self::matches_domain(&host, &self.ru_domains) {
             return Category::Ru;
         }
         Category::NonRu
     }
-}
-
-fn dedup(items: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    items
-        .into_iter()
-        .map(|s| s.trim().trim_start_matches('.').to_lowercase())
-        .filter(|s| !s.is_empty())
-        .filter(|s| seen.insert(s.clone()))
-        .collect()
 }
 
 pub fn parse_domains(text: &str) -> Vec<String> {
@@ -645,6 +655,50 @@ mod tests {
         assert_eq!(rules.classify("example.com"), Category::NonRu);
         assert_eq!(rules.classify("192.168.1.1"), Category::Private);
         assert_eq!(rules.classify("8.8.8.8"), Category::NonRu);
+    }
+
+    #[test]
+    fn blocked_domains_use_the_vpn_exit() {
+        let rules = Ruleset {
+            blocked_domains: ["chatgpt.com".to_owned()].into_iter().collect(),
+            ..Ruleset::default()
+        };
+        assert_eq!(rules.classify("chatgpt.com"), Category::NonRu);
+        assert_eq!(rules.classify("ab.chatgpt.com"), Category::NonRu);
+        assert_eq!(rules.classify("notchatgpt.com"), Category::NonRu);
+    }
+
+    #[test]
+    fn blocked_ru_domain_overrides_the_suffix() {
+        let rules = Ruleset {
+            ru_domains: ["ru".to_owned()].into_iter().collect(),
+            blocked_domains: ["blocked.ru".to_owned()].into_iter().collect(),
+            ..Ruleset::default()
+        };
+        assert_eq!(rules.classify("blocked.ru"), Category::NonRu);
+        assert_eq!(rules.classify("ok.ru"), Category::Ru);
+    }
+
+    #[test]
+    fn cached_domains_list_is_blocked_not_russian() {
+        let dir = std::env::temp_dir().join(format!(
+            "spvpn-rules-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let split = SplitConfig {
+            rules: crate::store::SplitRules {
+                domains: "https://example.test/domains.lst".into(),
+                ..Default::default()
+            },
+            ..SplitConfig::default()
+        };
+        let path = cache_path(&dir, &split.rules.domains).unwrap();
+        std::fs::write(&path, "chatgpt.com\n").unwrap();
+        let rules = Ruleset::load(&dir, &split);
+        assert_eq!(rules.classify("chatgpt.com"), Category::NonRu);
+        assert_eq!(rules.classify("ya.ru"), Category::Ru);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
