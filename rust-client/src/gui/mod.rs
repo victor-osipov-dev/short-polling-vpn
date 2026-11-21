@@ -707,10 +707,25 @@ impl App {
                 // Some Windows setups never deliver a `Paste` event to egui,
                 // although the Ctrl+V key event still arrives. Read the
                 // clipboard directly so pasting works everywhere.
-                let ctrl_v = ui.input(|i| i.key_pressed(egui::Key::V) && i.modifiers.ctrl);
-                if ctrl_v && url_field.has_focus() {
-                    if let Some(text) = platform::clipboard_text() {
-                        self.new_sub = text.trim().to_owned();
+                // winit reports Ctrl+V either as a Key event or as a Paste
+                // event (the latter carries no usable key code on Windows).
+                // Windows delivers Ctrl+V to winit as a V *release* event
+                // (WM_SYSKEYUP), without a press and without a Paste event.
+                let ctrl_v = ui.input(|i| {
+                    (i.key_pressed(egui::Key::V) || i.key_released(egui::Key::V))
+                        && i.modifiers.ctrl
+                        || i
+                            .raw
+                            .events
+                            .iter()
+                            .any(|e| matches!(e, egui::Event::Paste(_)))
+                });
+                if ctrl_v {
+                    tracing::debug!("GUI ctrl+v in subscription field: focus={}", url_field.has_focus());
+                    if url_field.has_focus() {
+                        if let Some(text) = platform::clipboard_text() {
+                            self.new_sub = text.trim().to_owned();
+                        }
                     }
                 }
                 let name_hint = self.tr("Название (необязательно)", "Name (optional)");
@@ -1471,6 +1486,21 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
+        let keys = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::V),
+                i.modifiers.ctrl,
+                format!("{:?}", i.raw.events),
+            )
+        });
+        if keys.0 || keys.1 {
+            tracing::debug!(
+                "GUI key state: V={} ctrl={} events={}",
+                keys.0,
+                keys.1,
+                keys.2
+            );
+        }
         self.refresh_logs(false);
 
         self.header(ui);
