@@ -1293,6 +1293,10 @@ impl App {
                 if ui.button(self.tr("Обновить", "Refresh")).clicked() {
                     self.refresh_logs(true);
                 }
+                if ui.button(self.tr("Копировать", "Copy all")).clicked() {
+                    ui.ctx().copy_text(self.logs.clone());
+                    self.toast(self.tr("Логи скопированы", "Logs copied"));
+                }
                 if ui.button(self.tr("Папка", "Folder")).clicked() {
                     let _ = std::process::Command::new("explorer.exe")
                         .arg(&self.dir)

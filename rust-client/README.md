@@ -129,7 +129,7 @@ spvpn run --no-tui
 
 ```powershell
 spvpn test --all --parallel 4
-spvpn test 089aabde-0d81-4d5e-946b-513901db4c16::relay --target https://ifconfig.me/ip
+spvpn test 089aabde-0d81-4d5e-946b-513901db4c16::relay --target https://api.ipify.org
 spvpn config set cooldown 30
 spvpn config set urls "https://edge1.example.com,https://edge2.example.com"
 spvpn config set disabled_urls "https://dead.example.com:8443"   # исключить узел из маршрутов
@@ -181,9 +181,10 @@ spvpn config set disabled_urls "https://dead.example.com:8443"   # исключ�
 | Ключ | По умолчанию | Смысл |
 | --- | --- | --- |
 | `socks` | `127.0.0.1:8890` | адрес SOCKS5 |
+| `http-listen` | `127.0.0.1:18889` | HTTP CONNECT-прокси для системного прокси Windows (`spvpn run --http ...`) |
 | `control` | `127.0.0.1:8891` | локальный control API |
 | `poll-ms` / `jitter-ms` | `200` / `5` | интервал поллов и джиттер |
-| `idle-ms` / `min-ms` | `2000` / `100` | адаптивный поллинг: простой и нижняя граница |
+| `idle-ms` / `min-ms` | `800` / `100` | адаптивный поллинг: простой и нижняя граница |
 | `chunk` | `262144` | сколько байт забирать на сессию за полл |
 | `frames` | `32` | максимум кадров в одном полле |
 | `pad` | `true` | выравнивание размера запросов |
@@ -194,8 +195,12 @@ spvpn config set disabled_urls "https://dead.example.com:8443"   # исключ�
 | `idle` | `0` (выкл.) | пауза трафиковых поллов после простоя, с |
 | `urls` | — | ручные entry-URL (включает профиль `manual`) |
 | `psk` | — | общий PSK, если в подписке нет per-user секрета |
-| `check-url` | `https://ifconfig.me/ip` | цель для `spvpn test` |
+| `check-url` | `https://www.cloudflare.com/cdn-cgi/trace` | цель для `spvpn test` |
 | `poll-path` / `host-header` | `/poll` / — | путь полла и Host для CDN-режима |
+
+Exit IP в `spvpn test` берётся из строки `ip=...` (Cloudflare trace), из голого
+IP-адреса (ipify, ifconfig.me) или из JSON-поля `ip` / `query` / `origin`.
+Тест считается проваленным, если IP не удалось распознать.
 
 TUN-настройки (`tun-address`, `tun-netmask`, `tun-dns`, `tun-mtu`,
 `tun-dns-upstream`, `tun-exclude`) редактируются в GUI и хранятся в `config.json`.
@@ -239,4 +244,4 @@ cargo test --no-default-features --features tui
 ```
 
 Проверяются crypto (совместимость с Python-сервером по ключам/HMAC), кадры, store,
-split-routing, карантин и рендер TUI.
+split-routing/failover, разбор exit IP и рендер TUI.

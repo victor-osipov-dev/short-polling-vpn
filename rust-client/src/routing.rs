@@ -88,11 +88,10 @@ impl Ruleset {
                 .map(|d| d.to_lowercase()),
         );
 
-        let mut private_nets: Vec<IpNet> = DEFAULT_PRIVATE
+        let private_nets: Vec<IpNet> = DEFAULT_PRIVATE
             .iter()
             .filter_map(|c| c.parse::<IpNet>().ok())
             .collect();
-        private_nets.extend(ru_nets.iter().copied().filter(|_| false));
 
         Self {
             ru_nets,

@@ -750,6 +750,8 @@ fn cmd_config(dir: &std::path::Path, args: ConfigArgs, json: bool) -> Result<()>
                 "socks" | "socks_listen" => s.socks_listen = value,
                 "control" | "control_listen" => s.control_listen = value,
                 "poll-ms" | "poll_interval_ms" => s.poll_interval_ms = value.parse()?,
+                "idle-ms" | "poll_idle_ms" => s.poll_idle_ms = value.parse()?,
+                "min-ms" | "poll_min_ms" => s.poll_min_ms = value.parse()?,
                 "jitter-ms" | "poll_jitter_ms" => s.poll_jitter_ms = value.parse()?,
                 "chunk" | "max_chunk_bytes" => s.max_chunk_bytes = value.parse()?,
                 "frames" | "max_frames_per_poll" => s.max_frames_per_poll = value.parse()?,

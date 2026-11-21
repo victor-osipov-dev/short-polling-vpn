@@ -120,17 +120,11 @@ pub async fn test_profile(
                     result.latency_ms = started.elapsed().as_millis() as u64;
                     if !status.is_success() {
                         result.error = format!("HTTP {status}");
-                    } else {
-                        result.exit_ip = body
-                            .lines()
-                            .find_map(|line| line.strip_prefix("ip="))
-                            .unwrap_or("")
-                            .trim()
-                            .to_owned();
+                    } else if let Some(ip) = parse_exit_ip(&body) {
+                        result.exit_ip = ip;
                         result.ok = true;
-                        if result.exit_ip.is_empty() {
-                            result.error = "no ip= line in response".into();
-                        }
+                    } else {
+                        result.error = "cannot parse exit IP from response".into();
                     }
                 }
                 Err(err) => result.error = format!("read body: {err}"),
@@ -142,6 +136,33 @@ pub async fn test_profile(
     socks_task.abort();
     handle.stop().await;
     result
+}
+
+/// Extracts the exit IP from several common check endpoints, matching the
+/// Android client: Cloudflare's `ip=` trace, a bare IP (ipify/ifconfig.me)
+/// and JSON bodies with `ip`, `query` or `origin` keys.
+fn parse_exit_ip(body: &str) -> Option<String> {
+    if let Some(ip) = body.lines().find_map(|line| line.strip_prefix("ip=")) {
+        let ip = ip.trim();
+        if !ip.is_empty() {
+            return Some(ip.to_owned());
+        }
+    }
+    let trimmed = body.trim();
+    if trimmed.parse::<std::net::IpAddr>().is_ok() {
+        return Some(trimmed.to_owned());
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        for key in ["ip", "query", "origin", "addr"] {
+            if let Some(ip) = value.get(key).and_then(|v| v.as_str()) {
+                let ip = ip.trim();
+                if !ip.is_empty() {
+                    return Some(ip.to_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `reqwest::Error` only prints the outer wrapper, which hides the useful
@@ -245,15 +266,49 @@ pub async fn public_ip() -> Result<String> {
         .text()
         .await
         .context("cannot read trace response")?;
-    Ok(body
-        .lines()
-        .find_map(|line| line.strip_prefix("ip="))
-        .unwrap_or("")
-        .to_owned())
+    parse_exit_ip(&body).context("cannot parse exit IP from response")
 }
 
 #[allow(dead_code)]
 fn _assert_send_sync() {
     fn is_send<T: Send>() {}
     is_send::<Arc<Tunnel>>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_exit_ip;
+
+    #[test]
+    fn parses_cloudflare_trace() {
+        let body = "fl=123abc\nh=www.cloudflare.com\nip=2a0c:5d00:3001::a971:a124\nloc=RU\n";
+        assert_eq!(
+            parse_exit_ip(body).as_deref(),
+            Some("2a0c:5d00:3001::a971:a124")
+        );
+    }
+
+    #[test]
+    fn parses_bare_ip() {
+        assert_eq!(parse_exit_ip(" 45.94.118.166\n").as_deref(), Some("45.94.118.166"));
+    }
+
+    #[test]
+    fn parses_json_apis() {
+        assert_eq!(parse_exit_ip(r#"{"ip":"1.2.3.4"}"#).as_deref(), Some("1.2.3.4"));
+        assert_eq!(
+            parse_exit_ip(r#"{"query":"5.6.7.8","city":"X"}"#).as_deref(),
+            Some("5.6.7.8")
+        );
+        assert_eq!(
+            parse_exit_ip(r#"{"origin":"9.8.7.6"}"#).as_deref(),
+            Some("9.8.7.6")
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_text() {
+        assert_eq!(parse_exit_ip("<html>hello</html>"), None);
+        assert_eq!(parse_exit_ip(""), None);
+    }
 }
