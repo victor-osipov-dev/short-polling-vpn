@@ -78,6 +78,9 @@ struct App {
     logs_at: Instant,
     toast: Option<(String, Instant)>,
     add_open: bool,
+    /// Focus the URL field as soon as the "new subscription" card opens so
+    /// Ctrl+V works without an extra click.
+    add_focus_pending: bool,
     new_sub: String,
     new_sub_name: String,
     store_revision: u64,
@@ -133,6 +136,7 @@ impl App {
             logs_at: Instant::now() - Duration::from_secs(5),
             toast: None,
             add_open: false,
+            add_focus_pending: false,
             new_sub: String::new(),
             new_sub_name: String::new(),
             store_revision: 0,
@@ -674,6 +678,7 @@ impl App {
                     .clicked()
                 {
                     self.add_open = !self.add_open;
+                    self.add_focus_pending = self.add_open;
                 }
                 if ui.button(self.tr("Обновить", "Refresh")).clicked() {
                     self.backend.refresh_subscriptions();
@@ -690,11 +695,15 @@ impl App {
         if self.add_open {
             theme::card_ui(ui, |ui| {
                 ui.label(egui::RichText::new(self.tr("Новая подписка", "New subscription")).strong());
-                ui.add(
+                let url_field = ui.add(
                     egui::TextEdit::singleline(&mut self.new_sub)
                         .hint_text("https://example/subscription.json")
                         .desired_width(f32::INFINITY),
                 );
+                if self.add_focus_pending {
+                    url_field.request_focus();
+                    self.add_focus_pending = false;
+                }
                 let name_hint = self.tr("Название (необязательно)", "Name (optional)");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_sub_name)
@@ -715,9 +724,17 @@ impl App {
                         };
                         self.backend.add_subscription(source, name);
                         self.add_open = false;
+                        self.add_focus_pending = false;
+                    }
+                    if ui.button(self.tr("Вставить", "Paste")).clicked() {
+                        if let Some(text) = platform::clipboard_text() {
+                            self.new_sub = text.trim().to_owned();
+                        }
+                        url_field.request_focus();
                     }
                     if ui.button(self.tr("Отмена", "Cancel")).clicked() {
                         self.add_open = false;
+                        self.add_focus_pending = false;
                     }
                 });
             });

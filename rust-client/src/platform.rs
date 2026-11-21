@@ -122,4 +122,39 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// Reads Unicode text from the Windows clipboard. Used by the GUI as a
+/// fallback for environments where egui does not deliver Ctrl+V events to a
+/// newly opened TextEdit.
+pub fn clipboard_text() -> Option<String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, OpenClipboard,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        // CF_UNICODETEXT == 13
+        let handle = GetClipboardData(13);
+        if handle.is_null() {
+            let _ = CloseClipboard();
+            return None;
+        }
+        let ptr = GlobalLock(handle) as *const u16;
+        if ptr.is_null() {
+            let _ = CloseClipboard();
+            return None;
+        }
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+        let _ = GlobalUnlock(handle);
+        let _ = CloseClipboard();
+        Some(text)
+    }
+}
+
 pub use crate::tun::{is_elevated, relaunch_elevated};
