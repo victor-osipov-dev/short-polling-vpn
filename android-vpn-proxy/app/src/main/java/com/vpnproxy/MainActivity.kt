@@ -562,7 +562,7 @@ private fun SubscriptionCard(
 private fun HomeHeader(onOpenSettings: () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("Short Polling VPN", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(tr("Internet", "Интернет"), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Text(tr("Secure tunnel", "Защищённый туннель"),
                  color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
         }

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Интернет</string>
+    <string name="channel_name">Служба прокси</string>
+    <string name="channel_desc">Фоновая служба Интернет</string>
+    <string name="vpn_channel_name">Служба VPN</string>
+    <string name="vpn_channel_desc">Системный VPN-туннель (tun2socks)</string>
+    <string name="notification_running">Прокси запущен</string>
+    <string name="start">Запустить</string>
+    <string name="stop">Остановить</string>
+    <string name="simple_config">Просто</string>
+    <string name="advanced_config">Конфиг</string>
+    <string name="log_tab">Журнал</string>
+    <string name="proxy_status">Статус</string>
+    <string name="save">Сохранить</string>
+</resources>

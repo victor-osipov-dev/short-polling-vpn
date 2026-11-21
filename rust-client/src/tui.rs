@@ -191,7 +191,7 @@ fn draw_onboarding(frame: &mut Frame, dir: &Path) {
     let area = frame.area();
     let lines = vec![
         Line::from(Span::styled(
-            "Short Polling VPN",
+            "Internet",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -390,7 +390,7 @@ fn draw(
 
     let title = Line::from(vec![
         Span::styled(
-            " Short Polling VPN ",
+            " Internet ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -702,7 +702,7 @@ mod tests {
             auto_scroll: true,
         };
         let screen = render(&ui, &sample_status(), "");
-        assert!(screen.contains("Short Polling VPN"), "{screen}");
+        assert!(screen.contains("Internet"), "{screen}");
         assert!(screen.contains("Relay"), "{screen}");
         assert!(screen.contains("127.0.0.1:1080"), "{screen}");
         assert!(screen.contains("uptime"), "{screen}");

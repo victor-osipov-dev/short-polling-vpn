@@ -44,7 +44,7 @@ impl Tray {
         ]);
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("SPVPN")
+            .with_tooltip(lang.t("Интернет", "Internet"))
             .with_icon(app_icon())
             .with_menu_on_left_click(false)
             .build()

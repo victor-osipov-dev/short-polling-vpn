@@ -20,7 +20,7 @@ use spvpn::tunnel::Tunnel;
 #[command(
     name = "spvpn",
     version,
-    about = "Short Polling VPN — fast, minimal Rust client",
+    about = "Internet — fast, minimal Rust client",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -424,7 +424,7 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
     if json {
         println!("{}", serde_json::to_string_pretty(&state)?);
     } else {
-        println!("Short Polling VPN {} — connected", spvpn::VERSION);
+        println!("Internet {} — connected", spvpn::VERSION);
         println!("  profile : {}", tunnel.profile_name);
         println!(
             "  mode    : {}",

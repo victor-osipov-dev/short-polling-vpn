@@ -34,15 +34,22 @@ enum Page {
 const CONTENT_WIDTH: f32 = 560.0;
 
 pub fn run(dir: PathBuf, minimized: bool) -> Result<()> {
+    let store = Store::load(&dir).ok();
+    let title = if store.as_ref().map(|s| s.settings.ui_language.as_str()) == Some("en") {
+        "Internet"
+    } else {
+        "Интернет"
+    };
     let minimized = minimized
-        || Store::load(&dir)
-            .map(|store| store.settings.ui_start_minimized)
+        || store
+            .as_ref()
+            .map(|s| s.settings.ui_start_minimized)
             .unwrap_or(false);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([430.0, 700.0])
             .with_min_inner_size([390.0, 560.0])
-            .with_title("SPVPN")
+            .with_title(title)
             .with_icon(egui::IconData {
                 rgba: icon_rgba(64),
                 width: 64,
@@ -52,7 +59,7 @@ pub fn run(dir: PathBuf, minimized: bool) -> Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "SPVPN",
+        title,
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, dir, minimized)?))),
     )
@@ -336,13 +343,13 @@ impl App {
             self.tray_tooltip_at = Instant::now();
             let shared = self.shared.lock();
             let text = if shared.disconnecting {
-                self.tr("SPVPN — отключение…", "SPVPN — disconnecting…")
+                self.tr("Интернет — отключение…", "Internet — disconnecting…")
             } else if shared.running {
-                self.tr("SPVPN — подключено", "SPVPN — connected")
+                self.tr("Интернет — подключено", "Internet — connected")
             } else if shared.busy {
-                self.tr("SPVPN — подключение…", "SPVPN — connecting…")
+                self.tr("Интернет — подключение…", "Internet — connecting…")
             } else {
-                "SPVPN"
+                self.tr("Интернет", "Internet")
             };
             if let Some(tray) = &self.tray {
                 tray.set_tooltip(text);
@@ -389,7 +396,7 @@ impl App {
             )
             .show(root, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("SPVPN").size(18.0).strong());
+                    ui.label(egui::RichText::new(self.tr("Интернет", "Internet")).size(18.0).strong());
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
