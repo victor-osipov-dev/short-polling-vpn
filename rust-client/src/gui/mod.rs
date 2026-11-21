@@ -668,6 +668,10 @@ impl App {
                 {
                     self.add_open = !self.add_open;
                 }
+                if ui.button(self.tr("Обновить", "Refresh")).clicked() {
+                    self.backend.refresh_subscriptions();
+                    self.toast(self.tr("Обновление подписок…", "Refreshing subscriptions…"));
+                }
                 if ui.button(self.tr("Тест всех", "Test all")).clicked() {
                     self.test_profiles(true, None);
                     ui.ctx().request_repaint();
