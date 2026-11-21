@@ -679,6 +679,7 @@ impl App {
 
     fn stats(&self, ui: &mut egui::Ui, status: &crate::tunnel::Status, shared: &SharedState) {
         theme::card_ui(ui, |ui| {
+            let rect = ui.available_rect_before_wrap();
             ui.columns(3, |cols| {
                 self.stat(
                     &mut cols[0],
@@ -687,7 +688,6 @@ impl App {
                         .avg_latency_ms
                         .map(|ms| format!("{ms} ms"))
                         .unwrap_or_else(|| "—".into()),
-                    false,
                 );
                 self.stat(
                     &mut cols[1],
@@ -697,15 +697,22 @@ impl App {
                         human_bytes(status.tx_bytes),
                         human_bytes(status.rx_bytes)
                     ),
-                    true,
                 );
                 self.stat(
                     &mut cols[2],
                     self.tr("Время", "Uptime"),
                     &format_duration(status.uptime_s),
-                    true,
                 );
             });
+            let bottom = ui.cursor().min.y.max(rect.min.y + 40.0);
+            for i in 1..3 {
+                let x = rect.left() + rect.width() * (i as f32 / 3.0);
+                ui.painter().vline(
+                    x,
+                    rect.min.y..=bottom,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(58, 72, 92)),
+                );
+            }
             if !shared.exit_ip.is_empty() {
                 ui.add_space(6.0);
                 theme::hint(ui, &format!("exit IP: {}", shared.exit_ip));
@@ -721,15 +728,7 @@ impl App {
         });
     }
 
-    fn stat(&self, ui: &mut egui::Ui, label: &str, value: &str, separator: bool) {
-        if separator {
-            let rect = ui.max_rect();
-            ui.painter().vline(
-                rect.left(),
-                rect.min.y..=rect.max.y,
-                egui::Stroke::new(1.0, theme::BORDER),
-            );
-        }
+    fn stat(&self, ui: &mut egui::Ui, label: &str, value: &str) {
         ui.vertical_centered(|ui| {
             ui.label(egui::RichText::new(value).size(14.0).strong());
             theme::hint(ui, label);
@@ -938,10 +937,21 @@ impl App {
                     egui::Sense::click(),
                 );
                 let mut test_clicked = false;
+                let mut row_clicked = false;
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    let _ = ui.radio(id == active, "");
-                    ui.label(egui::RichText::new(name).strong());
+                    if ui.radio(id == active, "").clicked() {
+                        row_clicked = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Label::new(egui::RichText::new(name).strong())
+                                .sense(egui::Sense::click()),
+                        )
+                        .clicked()
+                    {
+                        row_clicked = true;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button(self.tr("Тест", "Test")).clicked() {
                             test_clicked = true;
@@ -965,14 +975,29 @@ impl App {
                 });
                 if !checking {
                     if let Some(result) = result {
-                        if !result.ok {
-                            theme::hint(ui, &result.error);
+                        let hint = if !result.ok {
+                            Some(result.error.clone())
                         } else if !result.exit_ip.is_empty() {
-                            theme::hint(ui, &format!("exit {}", result.exit_ip));
+                            Some(format!("exit {}", result.exit_ip))
+                        } else {
+                            None
+                        };
+                        if let Some(hint) = hint {
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        egui::RichText::new(hint).size(11.0).color(theme::MUTED),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                row_clicked = true;
+                            }
                         }
                     }
                 }
-                if card_click.clicked() && !test_clicked {
+                if (card_click.clicked() || row_clicked) && !test_clicked {
                     *select = Some(id.to_owned());
                 }
             });
