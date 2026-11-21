@@ -5,7 +5,7 @@
   - ClientSession — состояние одной локальной TCP-сессии
   - ClientTunnel — базовый класс туннеля (сессии, пуллинг, DNS relay, URL selection)
 
-Используется desktop_client.py, client.py и android proxy_engine.py.
+Используется client.py (эталонный CLI) и android proxy_engine.py (своя копия).
 """
 
 import asyncio

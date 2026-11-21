@@ -18,3 +18,10 @@ config.yaml
 *.exe
 stress-results/
 stress-results-*/
+rust-client/target/
+*.old*.exe
+# Old Electron client, removed in 1.0.1 (a single locked build artifact may remain locally)
+desktop-app/
+
+# GitHub Pages serves the Windows client from docs/downloads/
+!docs/downloads/*.exe

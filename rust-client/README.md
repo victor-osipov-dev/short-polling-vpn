@@ -1,9 +1,13 @@
-# Short Polling VPN — клиент на Rust (`spvpn`)
+# Short Polling VPN 1.0.1 — основной клиент для Windows (`spvpn`)
 
-Минималистичный и быстрый клиент того же протокола, что и Android/Desktop
-приложения: тот же poll-протокол, шифрование, MAC, маршруты и split-routing.
+Нативный клиент для ПК: тот же poll-протокол, шифрование, MAC, маршруты и
+split-routing, что и в Android-приложении. Это единственный поддерживаемый
+десктопный клиент — Electron-версия и старый Python-GUI удалены из репозитория.
 Один бинарник без Python и Electron: по умолчанию открывается нативное окно,
 CLI/TUI доступны через `--no-gui` / `run`.
+
+- Сайт и прямая загрузка: <https://victor-osipov-dev.github.io/short-polling-vpn/>
+- Релиз 1.0.1: <https://github.com/victor-osipov-dev/short-polling-vpn/releases/tag/v1.0.1>
 
 Что умеет:
 

@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Short Polling VPN — Android и Windows</title>
-<meta name="description" content="Short Polling VPN — клиенты для Android и Windows: подписки, профили, тест соединения, системный прокси и TUN. Скачать APK и EXE.">
+<title>Short Polling VPN — Android и Windows (Rust)</title>
+<meta name="description" content="Short Polling VPN 1.0.1 — нативный Rust-клиент для Windows и Android: подписки, профили, тест соединения, системный прокси и VPN/TUN. Скачать APK и EXE.">
 <style>
   :root{
     --bg:#0b0f17; --card:#141a26; --card2:#1b2333; --text:#e8eefc; --muted:#93a1bd;
@@ -78,16 +78,20 @@
   <header>
     <div class="logo">🛡️</div>
     <h1>Short Polling VPN</h1>
-    <p class="sub">Клиенты Short Polling VPN для Android и Windows: подписки, профили, тест соединения, системный прокси и настоящий TUN-режим.</p>
+    <p class="sub">Short Polling VPN 1.0.1: нативный Rust-клиент для Windows и Android-приложение. Подписки, профили, тест соединения, системный прокси и настоящий TUN-режим без sing-box.</p>
     <div class="cta">
+      <a class="btn btn-desktop" href="downloads/Short-Polling-VPN-1.0.1.exe" download>
+        💻 Скачать Windows 1.0.1 (exe)
+      </a>
       <a id="download-apk" class="btn btn-primary" href="https://github.com/victor-osipov-dev/short-polling-vpn/releases">
         ⬇ Скачать APK
       </a>
-      <a id="download-desktop" class="btn btn-desktop" href="https://github.com/victor-osipov-dev/short-polling-vpn/releases">
-        💻 Скачать для Windows
+      <a id="download-desktop" class="btn btn-ghost" href="https://github.com/victor-osipov-dev/short-polling-vpn/releases">
+        Все версии на GitHub
       </a>
       <a class="btn btn-ghost" href="https://github.com/victor-osipov-dev/short-polling-vpn">Исходники на GitHub</a>
     </div>
+    <p class="meta">Windows: <code>SPVPN 1.0.1</code> · контрольная сумма: <a href="downloads/SHA256SUMS.txt">SHA-256</a></p>
     <p class="meta" id="latest-meta">Загрузка версий…</p>
     <p class="meta" id="latest-desktop-meta"></p>
   </header>
@@ -101,10 +105,11 @@
     <h2>Как установить</h2>
     <div class="card">
       <ol>
-        <li>Скачай APK на телефон (кнопка выше или файл в списке релизов).</li>
-        <li>Открой файл — Android попросит разрешить установку из этого источника. Разреши и подтверди установку.</li>
-        <li>Запусти приложение и добавь подписку: ссылкой, из буфера обмена или сканированием QR-кода.</li>
-        <li>Выбери профиль, нажми «Подключить» и подожди, пока пройдёт тест соединения.</li>
+        <li><b>Windows:</b> скачай <code>Short-Polling-VPN-1.0.1.exe</code> кнопкой выше или из релиза, запусти — установка не нужна.</li>
+        <li>Добавь подписку на вкладке «Настройки» (ссылкой, файлом или JSON), выбери профиль на главном экране.</li>
+        <li>Выбери режим «Прокси» (системный HTTP-прокси) или «VPN» (TUN-адаптер; потребуется подтверждение UAC).</li>
+        <li>Нажми «Подключить». Кнопка «Тест» показывает задержку, exit IP и фактический маршрут.</li>
+        <li><b>Android:</b> скачай APK, разреши установку из неизвестных источников, добавь подписку ссылкой/буфером/QR и подключись.</li>
       </ol>
       <p class="note" style="margin-top:16px">Сборка подписана debug-ключом, поэтому при обновлении поверх предыдущей версии данные приложения сохраняются, но Play Protect может показать предупреждение — это нормально для сборок вне Google Play.</p>
     </div>
@@ -117,8 +122,9 @@
       <div class="feat"><b>Профили</b><span>Список подключений по подпискам, тест одного профиля или сразу всех.</span></div>
       <div class="feat"><b>QR-импорт</b><span>Сканер работает в портретном режиме и наводится на код подписки.</span></div>
       <div class="feat"><b>Проверка соединения</b><span>Перед подключением проверяются узлы и доступность маршрута.</span></div>
-      <div class="feat"><b>Windows-клиент</b><span>Portable-сборка с загрузкой подписки, выбором профиля и журналом событий.</span></div>
-      <div class="feat"><b>Прокси и TUN</b><span>Системный прокси с восстановлением настроек и VPN-адаптер через sing-box.</span></div>
+      <div class="feat"><b>Нативный Windows-клиент</b><span>Один exe на Rust: GUI, CLI/TUI, подписки, профили, тесты и журнал без Python и Electron.</span></div>
+      <div class="feat"><b>Прокси и TUN</b><span>Системный HTTP-прокси с восстановлением настроек и VPN-адаптер на Wintun без sing-box.</span></div>
+      <div class="feat"><b>Split-routing</b><span>Маршруты RU/non-RU/private, цепочки реле и список заблокированных доменов.</span></div>
     </div>
   </section>
 
@@ -213,7 +219,6 @@ async function load(){
     setMeta('latest-meta', 'Android', apkRelease, '.apk');
     setMeta('latest-desktop-meta', 'Windows', exeRelease, '.exe');
     setButton('download-apk', apkRelease, '.apk', '⬇ Скачать APK');
-    setButton('download-desktop', exeRelease, '.exe', '💻 Скачать для Windows');
 
     box.innerHTML = [...releases].sort(compareReleases).map(r => {
       const apk = asset(r, '.apk');
