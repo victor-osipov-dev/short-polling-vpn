@@ -28,6 +28,8 @@ pub struct SharedState {
     pub running: bool,
     pub error: Option<String>,
     pub notice: Option<String>,
+    /// Newest release tag reported by GitHub, if it is newer than this build.
+    pub update_available: Option<String>,
     pub socks: Option<String>,
     pub http_proxy: Option<String>,
     pub control: Option<String>,
@@ -98,6 +100,41 @@ impl Backend {
 
     pub fn shared(&self) -> Arc<Mutex<SharedState>> {
         self.shared.clone()
+    }
+
+    /// Asks GitHub for the latest release and records it when it is newer
+    /// than the running build. Failures are silent — this is only a nicety.
+    pub fn check_updates(&self) {
+        let shared = self.shared.clone();
+        self.rt.spawn(async move {
+            let latest = async {
+                let client = reqwest::Client::builder()
+                    .user_agent("internet-update-check/1.0")
+                    .timeout(Duration::from_secs(12))
+                    .build()?;
+                let body = client
+                    .get("https://api.github.com/repos/victor-osipov-dev/short-polling-vpn/releases/latest")
+                    .send()
+                    .await?
+                    .text()
+                    .await?;
+                let value: serde_json::Value = serde_json::from_str(&body)?;
+                Ok::<_, anyhow::Error>(
+                    value
+                        .get("tag_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim_start_matches(['v', 'V'])
+                        .to_owned(),
+                )
+            }
+            .await;
+            if let Ok(tag) = latest {
+                if !tag.is_empty() && version_newer(&tag, crate::VERSION) {
+                    shared.lock().update_available = Some(tag);
+                }
+            }
+        });
     }
 
     pub fn refresh(&self) {
@@ -471,4 +508,24 @@ async fn bind_listener(addr: &str, label: &str) -> Result<TcpListener> {
         }
         Err(err) => Err(err).with_context(|| format!("cannot bind {label} on {addr}")),
     }
+}
+
+/// Compares dotted numeric versions, e.g. `1.0.2` > `1.0.1`.
+fn version_newer(latest: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u64> {
+        v.split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.parse().ok())
+            .collect()
+    };
+    let latest = parse(latest);
+    let current = parse(current);
+    for i in 0..latest.len().max(current.len()) {
+        let a = *latest.get(i).unwrap_or(&0);
+        let b = *current.get(i).unwrap_or(&0);
+        if a != b {
+            return a > b;
+        }
+    }
+    false
 }

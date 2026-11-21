@@ -52,6 +52,8 @@ pub struct Settings {
     pub ui_autostart: bool,
     pub ui_close_to_tray: bool,
     pub ui_start_minimized: bool,
+    /// Check GitHub for a newer release and show an in-app notification.
+    pub ui_check_updates: bool,
     /// Automatically point the Windows system proxy at the local SOCKS5 port.
     pub system_proxy: bool,
     /// Mode used by the manual profile: `proxy` or `vpn`.
@@ -100,6 +102,7 @@ impl Default for Settings {
             ui_autostart: false,
             ui_close_to_tray: true,
             ui_start_minimized: false,
+            ui_check_updates: true,
             system_proxy: true,
             manual_mode: "proxy".into(),
             tun_address: "10.7.0.1".into(),

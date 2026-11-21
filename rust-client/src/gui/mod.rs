@@ -33,6 +33,54 @@ enum Page {
 /// blocks share one width and do not stretch across a wide window.
 const CONTENT_WIDTH: f32 = 560.0;
 
+/// Stable ids for every editable text field, so Ctrl+C/Ctrl+V can find the
+/// focused field even though winit does not deliver the usual clipboard events.
+const TEXT_SUB_URL: &str = "text-sub-url";
+const TEXT_SUB_NAME: &str = "text-sub-name";
+const TEXT_CHECK_URL: &str = "text-check-url";
+const TEXT_TUN_ADDRESS: &str = "text-tun-address";
+const TEXT_TUN_NETMASK: &str = "text-tun-netmask";
+const TEXT_TUN_DNS: &str = "text-tun-dns";
+const TEXT_TUN_DNS_UPSTREAM: &str = "text-tun-dns-upstream";
+const TEXT_TUN_EXCLUDE: &str = "text-tun-exclude";
+
+#[derive(Clone, Copy)]
+enum TextTarget {
+    SubUrl,
+    SubName,
+    CheckUrl,
+    TunAddress,
+    TunNetmask,
+    TunDns,
+    TunDnsUpstream,
+    TunExclude,
+}
+
+fn text_id(name: &str) -> egui::Id {
+    #[allow(deprecated)]
+    egui::Id::new(name)
+}
+
+fn byte_at_char(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len())
+}
+
+fn byte_range(
+    text: &str,
+    range: egui::text_selection::CCursorRange,
+) -> std::ops::Range<usize> {
+    let range = range.as_sorted_char_range();
+    byte_at_char(text, range.start.0)..byte_at_char(text, range.end.0)
+}
+
+fn slice_chars(text: &str, range: egui::text_selection::CCursorRange) -> String {
+    let range = byte_range(text, range);
+    text[range].to_owned()
+}
+
 pub fn run(dir: PathBuf, minimized: bool) -> Result<()> {
     let store = Store::load(&dir).ok();
     let title = if store.as_ref().map(|s| s.settings.ui_language.as_str()) == Some("en") {
@@ -96,6 +144,8 @@ struct App {
     last_shared_running: bool,
     hide_pending: bool,
     hidden_flag: Arc<AtomicBool>,
+    /// Dismissed update popup (only for this session).
+    update_dismissed: bool,
 }
 
 impl App {
@@ -105,6 +155,9 @@ impl App {
         let store = Store::load(&dir)?;
         let lang = Lang::from_code(&store.settings.ui_language);
         let backend = Backend::new(&dir)?;
+        if store.settings.ui_check_updates {
+            backend.check_updates();
+        }
         let shared = backend.shared();
         let tray = Tray::new(lang, false);
 
@@ -150,6 +203,7 @@ impl App {
             last_shared_running: false,
             hide_pending: minimized,
             hidden_flag,
+            update_dismissed: false,
         })
     }
 
@@ -401,6 +455,12 @@ impl App {
             .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(self.tr("Интернет", "Internet")).size(18.0).strong());
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("v{}", crate::VERSION))
+                            .size(11.0)
+                            .color(theme::MUTED),
+                    );
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
@@ -424,7 +484,7 @@ impl App {
                         ui.add_space(8.0);
                         self.nav_button(ui, Page::Logs, self.tr("Логи", "Logs"));
                         self.nav_button(ui, Page::Settings, self.tr("Настройки", "Settings"));
-                        self.nav_button(ui, Page::Home, self.tr("VPN", "VPN"));
+                        self.nav_button(ui, Page::Home, self.tr("Главная", "Home"));
                     });
                 });
             });
@@ -697,6 +757,7 @@ impl App {
                 ui.label(egui::RichText::new(self.tr("Новая подписка", "New subscription")).strong());
                 let url_field = ui.add(
                     egui::TextEdit::singleline(&mut self.new_sub)
+                        .id(text_id(TEXT_SUB_URL))
                         .hint_text("https://example/subscription.json")
                         .desired_width(f32::INFINITY),
                 );
@@ -704,33 +765,10 @@ impl App {
                     url_field.request_focus();
                     self.add_focus_pending = false;
                 }
-                // Some Windows setups never deliver a `Paste` event to egui,
-                // although the Ctrl+V key event still arrives. Read the
-                // clipboard directly so pasting works everywhere.
-                // winit reports Ctrl+V either as a Key event or as a Paste
-                // event (the latter carries no usable key code on Windows).
-                // Windows delivers Ctrl+V to winit as a V *release* event
-                // (WM_SYSKEYUP), without a press and without a Paste event.
-                let ctrl_v = ui.input(|i| {
-                    (i.key_pressed(egui::Key::V) || i.key_released(egui::Key::V))
-                        && i.modifiers.ctrl
-                        || i
-                            .raw
-                            .events
-                            .iter()
-                            .any(|e| matches!(e, egui::Event::Paste(_)))
-                });
-                if ctrl_v {
-                    tracing::debug!("GUI ctrl+v in subscription field: focus={}", url_field.has_focus());
-                    if url_field.has_focus() {
-                        if let Some(text) = platform::clipboard_text() {
-                            self.new_sub = text.trim().to_owned();
-                        }
-                    }
-                }
                 let name_hint = self.tr("Название (необязательно)", "Name (optional)");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_sub_name)
+                        .id(text_id(TEXT_SUB_NAME))
                         .hint_text(name_hint)
                         .desired_width(f32::INFINITY),
                 );
@@ -969,6 +1007,11 @@ impl App {
                         .checkbox(&mut self.store.settings.system_proxy, "")
                         .changed();
                     ui.end_row();
+                    ui.label(self.tr("Проверять обновления", "Check for updates"));
+                    changed |= ui
+                        .checkbox(&mut self.store.settings.ui_check_updates, "")
+                        .changed();
+                    ui.end_row();
                 });
         });
 
@@ -1060,6 +1103,7 @@ impl App {
                     changed |= ui
                         .add(
                             egui::TextEdit::singleline(&mut self.store.settings.check_url)
+                                .id(text_id(TEXT_CHECK_URL))
                                 .desired_width(260.0),
                         )
                         .changed();
@@ -1101,6 +1145,7 @@ impl App {
                     changed |= ui
                         .add(
                             egui::TextEdit::singleline(&mut self.store.settings.tun_address)
+                                .id(text_id(TEXT_TUN_ADDRESS))
                                 .desired_width(150.0),
                         )
                         .changed();
@@ -1109,6 +1154,7 @@ impl App {
                     changed |= ui
                         .add(
                             egui::TextEdit::singleline(&mut self.store.settings.tun_netmask)
+                                .id(text_id(TEXT_TUN_NETMASK))
                                 .desired_width(150.0),
                         )
                         .changed();
@@ -1117,6 +1163,7 @@ impl App {
                     changed |= ui
                         .add(
                             egui::TextEdit::singleline(&mut self.store.settings.tun_dns)
+                                .id(text_id(TEXT_TUN_DNS))
                                 .desired_width(150.0),
                         )
                         .changed();
@@ -1130,6 +1177,7 @@ impl App {
                     changed |= ui
                         .add(
                             egui::TextEdit::singleline(&mut self.store.settings.tun_dns_upstream)
+                                .id(text_id(TEXT_TUN_DNS_UPSTREAM))
                                 .desired_width(180.0),
                         )
                         .changed();
@@ -1139,6 +1187,7 @@ impl App {
                     if ui
                         .add(
                             egui::TextEdit::singleline(&mut text)
+                                .id(text_id(TEXT_TUN_EXCLUDE))
                                 .hint_text("1.2.3.4, 5.6.7.8")
                                 .desired_width(220.0),
                         )
@@ -1426,6 +1475,128 @@ fn display_split(
     });
 }
 
+impl App {
+    /// Handles Ctrl+C / Ctrl+V for every text field. Windows sends these
+    /// combinations as key-release events without a matching press, so the
+    /// ordinary egui clipboard events sometimes never arrive.
+    fn handle_clipboard_keys(&mut self, ctx: &egui::Context) {
+        let (copy, paste) = ctx.input(|i| {
+            let ctrl = i.modifiers.ctrl;
+            (
+                ctrl && (i.key_pressed(egui::Key::C) || i.key_released(egui::Key::C)),
+                ctrl && (i.key_pressed(egui::Key::V) || i.key_released(egui::Key::V)),
+            )
+        });
+        if !copy && !paste {
+            return;
+        }
+        let Some(id) = ctx.memory(|m| m.focused()) else {
+            return;
+        };
+        let target = if id == text_id(TEXT_SUB_URL) {
+            Some(TextTarget::SubUrl)
+        } else if id == text_id(TEXT_SUB_NAME) {
+            Some(TextTarget::SubName)
+        } else if id == text_id(TEXT_CHECK_URL) {
+            Some(TextTarget::CheckUrl)
+        } else if id == text_id(TEXT_TUN_ADDRESS) {
+            Some(TextTarget::TunAddress)
+        } else if id == text_id(TEXT_TUN_NETMASK) {
+            Some(TextTarget::TunNetmask)
+        } else if id == text_id(TEXT_TUN_DNS) {
+            Some(TextTarget::TunDns)
+        } else if id == text_id(TEXT_TUN_DNS_UPSTREAM) {
+            Some(TextTarget::TunDnsUpstream)
+        } else if id == text_id(TEXT_TUN_EXCLUDE) {
+            Some(TextTarget::TunExclude)
+        } else {
+            None
+        };
+        let Some(target) = target else {
+            return;
+        };
+        let range = egui::widgets::text_edit::TextEditState::load(ctx, id)
+            .and_then(|state| state.cursor.char_range());
+
+        match target {
+            TextTarget::SubUrl => Self::clipboard_on(ctx, &mut self.new_sub, copy, paste, range),
+            TextTarget::SubName => {
+                Self::clipboard_on(ctx, &mut self.new_sub_name, copy, paste, range)
+            }
+            TextTarget::CheckUrl => {
+                Self::clipboard_on(ctx, &mut self.store.settings.check_url, copy, paste, range)
+            }
+            TextTarget::TunAddress => Self::clipboard_on(
+                ctx,
+                &mut self.store.settings.tun_address,
+                copy,
+                paste,
+                range,
+            ),
+            TextTarget::TunNetmask => Self::clipboard_on(
+                ctx,
+                &mut self.store.settings.tun_netmask,
+                copy,
+                paste,
+                range,
+            ),
+            TextTarget::TunDns => {
+                Self::clipboard_on(ctx, &mut self.store.settings.tun_dns, copy, paste, range)
+            }
+            TextTarget::TunDnsUpstream => Self::clipboard_on(
+                ctx,
+                &mut self.store.settings.tun_dns_upstream,
+                copy,
+                paste,
+                range,
+            ),
+            TextTarget::TunExclude => {
+                if copy {
+                    let joined = self.store.settings.tun_exclude.join(", ");
+                    let selected = range
+                        .map(|r| slice_chars(&joined, r))
+                        .unwrap_or(joined);
+                    ctx.copy_text(selected);
+                }
+                if paste {
+                    if let Some(text) = platform::clipboard_text() {
+                        self.store.settings.tun_exclude = text
+                            .split([',', ' ', ';'])
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .collect();
+                    }
+                }
+            }
+        }
+    }
+
+    fn clipboard_on(
+        ctx: &egui::Context,
+        text: &mut String,
+        copy: bool,
+        paste: bool,
+        range: Option<egui::text_selection::CCursorRange>,
+    ) {
+        if copy {
+            let selected = range
+                .map(|r| slice_chars(text, r))
+                .unwrap_or_else(|| text.clone());
+            ctx.copy_text(selected);
+        }
+        if paste {
+            if let Some(clipped) = platform::clipboard_text() {
+                if let Some(range) = range {
+                    text.replace_range(byte_range(text, range), &clipped);
+                } else {
+                    *text = clipped;
+                }
+            }
+        }
+    }
+}
+
 impl eframe::App for App {
     /// Runs even while the window is hidden, so tray menus and background
     /// session state keep working in the tray.
@@ -1486,21 +1657,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
-        let keys = ctx.input(|i| {
-            (
-                i.key_pressed(egui::Key::V),
-                i.modifiers.ctrl,
-                format!("{:?}", i.raw.events),
-            )
-        });
-        if keys.0 || keys.1 {
-            tracing::debug!(
-                "GUI key state: V={} ctrl={} events={}",
-                keys.0,
-                keys.1,
-                keys.2
-            );
-        }
+        self.handle_clipboard_keys(ctx);
         self.refresh_logs(false);
 
         self.header(ui);
@@ -1531,6 +1688,42 @@ impl eframe::App for App {
                         Page::Logs => self.logs_page(ui),
                     });
             });
+
+        let update = self.shared.lock().update_available.clone();
+        if let Some(version) = update {
+            if !self.update_dismissed {
+                let mut dismissed = false;
+                let mut check_updates = self.store.settings.ui_check_updates;
+                egui::Window::new(self.tr("Доступно обновление", "Update available"))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        ui.label(format!("v{} → v{}", crate::VERSION, version));
+                        ui.checkbox(
+                            &mut check_updates,
+                            self.tr("Проверять обновления", "Check for updates"),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button(self.tr("Скачать", "Download")).clicked() {
+                                ctx.open_url(egui::OpenUrl::new_tab(
+                                    "https://github.com/victor-osipov-dev/short-polling-vpn/releases/latest",
+                                ));
+                            }
+                            if ui.button("OK").clicked() {
+                                dismissed = true;
+                            }
+                        });
+                    });
+                self.store.settings.ui_check_updates = check_updates;
+                if dismissed || !check_updates {
+                    self.update_dismissed = true;
+                    if !check_updates {
+                        self.save();
+                    }
+                }
+            }
+        }
 
         if let Some((text, until)) = &self.toast {
             if Instant::now() < *until {
