@@ -704,6 +704,15 @@ impl App {
                     url_field.request_focus();
                     self.add_focus_pending = false;
                 }
+                // Some Windows setups never deliver a `Paste` event to egui,
+                // although the Ctrl+V key event still arrives. Read the
+                // clipboard directly so pasting works everywhere.
+                let ctrl_v = ui.input(|i| i.key_pressed(egui::Key::V) && i.modifiers.ctrl);
+                if ctrl_v && url_field.has_focus() {
+                    if let Some(text) = platform::clipboard_text() {
+                        self.new_sub = text.trim().to_owned();
+                    }
+                }
                 let name_hint = self.tr("Название (необязательно)", "Name (optional)");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_sub_name)
