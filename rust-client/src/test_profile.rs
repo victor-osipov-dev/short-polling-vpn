@@ -136,12 +136,29 @@ pub async fn test_profile(
                 Err(err) => result.error = format!("read body: {err}"),
             }
         }
-        Err(err) => result.error = format!("{err:#}"),
+        Err(err) => result.error = describe_reqwest_error(&err),
     }
 
     socks_task.abort();
     handle.stop().await;
     result
+}
+
+/// `reqwest::Error` only prints the outer wrapper, which hides the useful
+/// part ("tcp connect error: deadline has elapsed"). Walk the source chain.
+fn describe_reqwest_error(err: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let next = cause.to_string();
+        if !next.is_empty() && !text.contains(&next) {
+            text.push_str(": ");
+            text.push_str(&next);
+        }
+        source = cause.source();
+    }
+    text
 }
 
 pub fn describe(decision: Decision) -> String {

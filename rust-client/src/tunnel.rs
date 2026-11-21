@@ -32,6 +32,10 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_OUTBOX: usize = 4 * 1024 * 1024;
 const REMOVE_AFTER_FIN: Duration = Duration::from_secs(5);
+/// Retries for polls whose TCP connection never came up. The entry nodes
+/// occasionally drop SYNs, and replaying the poll is safe because nothing
+/// reached the server yet.
+const POLL_CONNECT_RETRIES: u32 = 3;
 
 #[derive(Clone, Debug)]
 pub enum Down {
@@ -677,15 +681,34 @@ impl Tunnel {
         let started = Instant::now();
         let rx_before = self.stats.rx_bytes.load(Ordering::Relaxed);
 
-        let resp = self
-            .http
-            .post(url)
-            .headers(headers)
-            .body(body)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .with_context(|| format!("request to {base} failed"))?;
+        let mut attempt = 0u32;
+        let resp = loop {
+            let request = self
+                .http
+                .post(&url)
+                .headers(headers.clone())
+                .body(body.clone())
+                .timeout(Duration::from_secs(15));
+            match request.send().await {
+                Ok(resp) => break resp,
+                // A connect failure means the request never reached the
+                // server, so replaying it cannot duplicate frames. Retrying
+                // with a fresh connection fixes the intermittent SYN drops on
+                // the path to the entry nodes (the old client does the same).
+                Err(err)
+                    if err.is_connect()
+                        && !frames.is_empty()
+                        && attempt < POLL_CONNECT_RETRIES =>
+                {
+                    attempt += 1;
+                    tracing::debug!("poll connect retry {attempt} for {base}: {err}");
+                    tokio::time::sleep(Duration::from_millis(150 * u64::from(attempt))).await;
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| format!("request to {base} failed"));
+                }
+            }
+        };
 
         if let Some(date) = resp.headers().get(DATE).and_then(|v| v.to_str().ok()) {
             if let Ok(time) = httpdate::parse_http_date(date) {
@@ -1022,7 +1045,7 @@ async fn build_client(
 ) -> Result<(reqwest::Client, Vec<IpAddr>)> {
     let mut builder = reqwest::Client::builder()
         .no_proxy()
-        .connect_timeout(Duration::from_secs(4))
+        .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(20))
         .pool_max_idle_per_host(16)
         .pool_idle_timeout(Duration::from_secs(90))
