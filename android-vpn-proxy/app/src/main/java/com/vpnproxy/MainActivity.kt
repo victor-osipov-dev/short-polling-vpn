@@ -79,6 +79,13 @@ import java.util.UUID
 
 data class LogEntry(val id: Long, val text: String)
 
+private fun appVersion(context: Context): String = try {
+    @Suppress("DEPRECATION")
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.1"
+} catch (_: Exception) {
+    "1.0.1"
+}
+
 private fun isNewerVersion(latest: String, current: String): Boolean {
     fun parts(v: String) = v.split('.').mapNotNull { it.filter { c -> c.isDigit() }.toIntOrNull() }
     val a = parts(latest)
@@ -233,7 +240,7 @@ class MainActivity : ComponentActivity() {
                     conn.readTimeout = 8000
                     val body = conn.inputStream.bufferedReader().use { it.readText() }
                     val tag = JSONObject(body).optString("tag_name").removePrefix("v")
-                    if (tag.isNotEmpty() && isNewerVersion(tag, BuildConfig.VERSION_NAME)) {
+                    if (tag.isNotEmpty() && isNewerVersion(tag, appVersion(this@MainActivity))) {
                         withContext(Dispatchers.Main) { updateAvailable.value = tag }
                     }
                 } catch (_: Exception) {
@@ -984,7 +991,7 @@ fun UpdateDialog(version: String?, onDismiss: () -> Unit) {
         title = { Text(tr("Update available", "Доступно обновление")) },
         text = {
             Column {
-                Text("v${BuildConfig.VERSION_NAME} → v$version")
+                Text("v${appVersion(context)} → v$version")
                 Spacer(Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(
@@ -1029,6 +1036,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
 ) {
     var autoScroll by remember { mutableStateOf(true) }
+    val context = LocalContext.current
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -1075,7 +1083,7 @@ fun SettingsScreen(
                 2 -> LogTab(logs, autoScroll, { autoScroll = it })
             }
             Text(
-                "Internet v${BuildConfig.VERSION_NAME}",
+                "Internet v${appVersion(context)}",
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),

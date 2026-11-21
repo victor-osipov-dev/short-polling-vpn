@@ -679,33 +679,31 @@ impl App {
 
     fn stats(&self, ui: &mut egui::Ui, status: &crate::tunnel::Status, shared: &SharedState) {
         theme::card_ui(ui, |ui| {
-            ui.columns(4, |cols| {
+            ui.columns(3, |cols| {
                 self.stat(
                     &mut cols[0],
-                    self.tr("Сессии", "Sessions"),
-                    &status.active_sessions.to_string(),
-                );
-                self.stat(
-                    &mut cols[1],
                     self.tr("Задержка", "Latency"),
                     &status
                         .avg_latency_ms
                         .map(|ms| format!("{ms} ms"))
                         .unwrap_or_else(|| "—".into()),
+                    false,
                 );
                 self.stat(
-                    &mut cols[2],
+                    &mut cols[1],
                     self.tr("Трафик", "Traffic"),
                     &format!(
                         "↑{}  ↓{}",
                         human_bytes(status.tx_bytes),
                         human_bytes(status.rx_bytes)
                     ),
+                    true,
                 );
                 self.stat(
-                    &mut cols[3],
+                    &mut cols[2],
                     self.tr("Время", "Uptime"),
                     &format_duration(status.uptime_s),
+                    true,
                 );
             });
             if !shared.exit_ip.is_empty() {
@@ -723,7 +721,15 @@ impl App {
         });
     }
 
-    fn stat(&self, ui: &mut egui::Ui, label: &str, value: &str) {
+    fn stat(&self, ui: &mut egui::Ui, label: &str, value: &str, separator: bool) {
+        if separator {
+            let rect = ui.max_rect();
+            ui.painter().vline(
+                rect.left(),
+                rect.min.y..=rect.max.y,
+                egui::Stroke::new(1.0, theme::BORDER),
+            );
+        }
         ui.vertical_centered(|ui| {
             ui.label(egui::RichText::new(value).size(14.0).strong());
             theme::hint(ui, label);
@@ -925,14 +931,20 @@ impl App {
             .corner_radius(12)
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                let card_click = ui.interact(
+                    rect,
+                    text_id(&format!("profile-select-{id}")),
+                    egui::Sense::click(),
+                );
+                let mut test_clicked = false;
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    if ui.radio(id == active, "").clicked() {
-                        *select = Some(id.to_owned());
-                    }
+                    let _ = ui.radio(id == active, "");
                     ui.label(egui::RichText::new(name).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button(self.tr("Тест", "Test")).clicked() {
+                            test_clicked = true;
                             *test = Some(id.to_owned());
                         }
                         if checking {
@@ -959,6 +971,9 @@ impl App {
                             theme::hint(ui, &format!("exit {}", result.exit_ip));
                         }
                     }
+                }
+                if card_click.clicked() && !test_clicked {
+                    *select = Some(id.to_owned());
                 }
             });
         ui.add_space(2.0);
