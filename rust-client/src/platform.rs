@@ -30,8 +30,10 @@ fn backup_path(dir: &Path) -> std::path::PathBuf {
     dir.join("proxy-backup.json")
 }
 
-/// Points the current user's WinINet proxy at the local SOCKS5 listener and
-/// remembers the previous values for a clean restore.
+/// Points the current user's WinINet proxy at the local HTTP CONNECT listener
+/// and remembers the previous values for a clean restore. A plain
+/// `host:port` value is used because most Windows applications ignore the
+/// `socks=` form.
 pub fn enable_system_proxy(addr: &str, dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let path = backup_path(dir);
@@ -46,13 +48,13 @@ pub fn enable_system_proxy(addr: &str, dir: &Path) -> Result<()> {
     }
     let key = settings_key(true)?;
     key.set_value("ProxyEnable", &1u32)?;
-    key.set_value("ProxyServer", &format!("socks={addr}"))?;
+    key.set_value("ProxyServer", &addr.to_owned())?;
     key.set_value(
         "ProxyOverride",
         &"<local>;localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.2*;172.30.*;172.31.*;192.168.*",
     )?;
     refresh_wininet();
-    tracing::info!("system proxy -> socks={addr}");
+    tracing::info!("system proxy -> {addr}");
     Ok(())
 }
 

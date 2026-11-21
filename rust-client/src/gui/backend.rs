@@ -22,10 +22,14 @@ use crate::tun::{TunConfig, TunRuntime};
 #[derive(Default, Clone)]
 pub struct SharedState {
     pub busy: bool,
+    /// Set only while a session is being torn down, so the UI can say
+    /// "Disconnecting" instead of "Connecting".
+    pub disconnecting: bool,
     pub running: bool,
     pub error: Option<String>,
     pub notice: Option<String>,
     pub socks: Option<String>,
+    pub http_proxy: Option<String>,
     pub control: Option<String>,
     pub mode: String,
     pub tun_active: bool,
@@ -113,6 +117,10 @@ impl Backend {
             shared.running = false;
             shared.status = None;
             shared.tun_active = false;
+            shared.http_proxy = None;
+            if !shared.busy {
+                shared.disconnecting = false;
+            }
         }
     }
 
@@ -123,12 +131,14 @@ impl Backend {
                 return false;
             }
             shared.busy = true;
+            shared.disconnecting = false;
             shared.error = None;
             shared.notice = None;
         }
         if resolved.mode.eq_ignore_ascii_case("vpn") && !platform::is_elevated() {
             let mut shared = self.shared.lock();
             shared.busy = false;
+            shared.disconnecting = false;
             shared.error = Some("vpn_needs_admin".into());
             return false;
         }
@@ -163,6 +173,7 @@ impl Backend {
         {
             let mut shared = self.shared.lock();
             shared.busy = true;
+            shared.disconnecting = true;
             shared.error = None;
         }
         let shared = self.shared.clone();
@@ -173,9 +184,12 @@ impl Backend {
             }
             let mut state = shared.lock();
             state.busy = false;
+            state.disconnecting = false;
             state.running = false;
             state.status = None;
             state.socks = None;
+            state.http_proxy = None;
+            state.control = None;
             state.tun_active = false;
             state.notice = Some("disconnected".into());
         });
@@ -187,6 +201,12 @@ impl Backend {
             let dir = self.dir.clone();
             let _ = self.rt.block_on(async move { run.stop(&dir).await });
         }
+        let mut shared = self.shared.lock();
+        shared.busy = false;
+        shared.disconnecting = false;
+        shared.running = false;
+        shared.status = None;
+        shared.tun_active = false;
     }
 
     pub fn tunnel(&self) -> Option<Arc<Tunnel>> {
@@ -343,6 +363,13 @@ async fn start_session(
     let socks = socks_listener.local_addr()?.to_string();
     let socks_task = tokio::spawn(crate::socks::serve_listener(socks_listener, tunnel.clone()));
 
+    let http_listener = bind_listener(&settings.http_listen, "HTTP proxy").await?;
+    let http_addr = http_listener.local_addr()?.to_string();
+    let http_task = tokio::spawn(crate::http_proxy::serve_listener(
+        http_listener,
+        tunnel.clone(),
+    ));
+
     let control_listener = bind_listener(&settings.control_listen, "control").await?;
     let control_addr = control_listener.local_addr()?.to_string();
     let shutdown = Arc::new(Notify::new());
@@ -350,6 +377,7 @@ async fn start_session(
     let ctx = ControlCtx {
         tunnel: tunnel.clone(),
         socks: socks.clone(),
+        http: http_addr.clone(),
         shutdown,
         stopping,
     };
@@ -375,6 +403,7 @@ async fn start_session(
             }
             Err(err) => {
                 socks_task.abort();
+                http_task.abort();
                 control_task.abort();
                 handle.stop().await;
                 let _ = platform::disable_system_proxy(dir);
@@ -386,7 +415,7 @@ async fn start_session(
     if mode.eq_ignore_ascii_case("vpn") {
         let _ = platform::disable_system_proxy(dir);
     } else if settings.system_proxy {
-        if let Err(err) = platform::enable_system_proxy(&socks, dir) {
+        if let Err(err) = platform::enable_system_proxy(&http_addr, dir) {
             tracing::warn!("system proxy: {err:#}");
         }
     }
@@ -394,6 +423,7 @@ async fn start_session(
     let state = StateFile {
         pid: std::process::id(),
         socks: socks.clone(),
+        http: http_addr.clone(),
         control: control_addr.clone(),
         profile: tunnel.profile_name.clone(),
         started_at: crate::subscription::now_secs(),
@@ -402,11 +432,12 @@ async fn start_session(
     {
         let mut s = shared.lock();
         s.socks = Some(socks.clone());
+        s.http_proxy = Some(http_addr.clone());
         s.control = Some(control_addr.clone());
         s.mode = mode.clone();
     }
     tracing::info!(
-        "GUI session: mode={mode} socks={socks} control={control_addr} tun={}",
+        "GUI session: mode={mode} socks={socks} http={http_addr} control={control_addr} tun={}",
         tun.is_some()
     );
     drop(running);
@@ -416,7 +447,7 @@ async fn start_session(
         tun,
         socks,
         mode,
-        tasks: vec![socks_task, control_task],
+        tasks: vec![socks_task, http_task, control_task],
     })
 }
 

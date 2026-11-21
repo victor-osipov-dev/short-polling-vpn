@@ -16,6 +16,8 @@ use crate::tunnel::Tunnel;
 pub struct StateFile {
     pub pid: u32,
     pub socks: String,
+    #[serde(default)]
+    pub http: String,
     pub control: String,
     pub profile: String,
     pub started_at: i64,
@@ -44,6 +46,7 @@ pub fn clear_state(dir: &Path) {
 pub struct ControlCtx {
     pub tunnel: Arc<Tunnel>,
     pub socks: String,
+    pub http: String,
     pub shutdown: Arc<Notify>,
     pub stopping: Arc<AtomicBool>,
 }
@@ -94,6 +97,7 @@ async fn handle(stream: TcpStream, ctx: ControlCtx) -> Result<()> {
             "ok": true,
             "pid": std::process::id(),
             "socks": ctx.socks,
+            "http": ctx.http,
             "status": ctx.tunnel.snapshot(),
         }),
         "stop" => {

@@ -133,7 +133,7 @@ async fn handle(tunnel: Arc<Tunnel>, mut stream: TcpStream, peer: SocketAddr) ->
 }
 
 /// Bidirectional bridge between the local socket and a tunnel session.
-async fn relay(
+pub async fn relay(
     stream: TcpStream,
     session: Arc<Session>,
     mut down_rx: mpsc::Receiver<Down>,

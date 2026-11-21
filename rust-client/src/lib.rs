@@ -4,6 +4,7 @@ pub mod cdn;
 pub mod control;
 pub mod crypto;
 pub mod frame;
+pub mod http_proxy;
 pub mod logging;
 pub mod routing;
 pub mod socks;

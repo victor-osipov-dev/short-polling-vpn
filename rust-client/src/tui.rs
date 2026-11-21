@@ -94,6 +94,7 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
         let ctx = ControlCtx {
             tunnel: tunnel.clone(),
             socks: actual_socks.clone(),
+            http: String::new(),
             shutdown: shutdown.clone(),
             stopping: stopping.clone(),
         };
@@ -120,6 +121,7 @@ pub async fn run(dir: PathBuf, profile: Option<String>) -> Result<()> {
     let state = StateFile {
         pid: std::process::id(),
         socks: actual_socks.clone(),
+        http: String::new(),
         control: actual_control.clone(),
         profile: tunnel.profile_name.clone(),
         started_at: crate::subscription::now_secs(),

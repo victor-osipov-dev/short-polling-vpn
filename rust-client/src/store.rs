@@ -15,6 +15,8 @@ pub const MANUAL_PROFILE_ID: &str = "manual";
 #[serde(default)]
 pub struct Settings {
     pub socks_listen: String,
+    /// HTTP CONNECT proxy used by the Windows system proxy setting.
+    pub http_listen: String,
     pub control_listen: String,
     pub poll_interval_ms: u64,
     pub poll_idle_ms: u64,
@@ -70,6 +72,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             socks_listen: "127.0.0.1:8890".into(),
+            http_listen: "127.0.0.1:18889".into(),
             control_listen: "127.0.0.1:8891".into(),
             poll_interval_ms: 200,
             poll_idle_ms: 800,

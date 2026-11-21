@@ -74,6 +74,9 @@ struct App {
     new_sub: String,
     new_sub_name: String,
     store_revision: u64,
+    /// Reconnect once the current session has finished stopping, e.g. when the
+    /// user switches between Proxy and VPN while connected.
+    reconnect_after_disconnect: bool,
     refresh_at: Instant,
     was_busy: bool,
     quitting: bool,
@@ -126,6 +129,7 @@ impl App {
             new_sub: String::new(),
             new_sub_name: String::new(),
             store_revision: 0,
+            reconnect_after_disconnect: false,
             refresh_at: Instant::now() - Duration::from_secs(2),
             was_busy: false,
             quitting: false,
@@ -183,6 +187,21 @@ impl App {
             }
         }
         self.save();
+
+        // The mode is read when a session starts, so switching it while
+        // connected must restart the session to actually take effect.
+        let (running, busy) = {
+            let shared = self.shared.lock();
+            (shared.running, shared.busy)
+        };
+        if running && !busy {
+            self.reconnect_after_disconnect = true;
+            self.disconnect();
+            self.toast(self.tr(
+                "Переподключение в новом режиме…",
+                "Reconnecting in the new mode…",
+            ));
+        }
     }
 
     fn active_resolved(&self) -> Result<ResolvedProfile> {
@@ -316,7 +335,9 @@ impl App {
         if self.tray_tooltip_at.elapsed() > Duration::from_secs(1) {
             self.tray_tooltip_at = Instant::now();
             let shared = self.shared.lock();
-            let text = if shared.running {
+            let text = if shared.disconnecting {
+                self.tr("SPVPN — отключение…", "SPVPN — disconnecting…")
+            } else if shared.running {
                 self.tr("SPVPN — подключено", "SPVPN — connected")
             } else if shared.busy {
                 self.tr("SPVPN — подключение…", "SPVPN — connecting…")
@@ -408,6 +429,7 @@ impl App {
         let shared = self.shared.lock().clone();
         let running = shared.running;
         let busy = shared.busy;
+        let disconnecting = shared.disconnecting;
         let status = shared.status.clone();
         let error = shared.error.clone();
 
@@ -419,10 +441,18 @@ impl App {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    let color = if running { theme::GREEN } else { theme::MUTED };
+                    let color = if disconnecting {
+                        theme::AMBER
+                    } else if running {
+                        theme::GREEN
+                    } else {
+                        theme::MUTED
+                    };
                     theme::pill(
                         ui,
-                        if running {
+                        if disconnecting {
+                            self.tr("ОТКЛЮЧЕНИЕ", "DISCONNECTING")
+                        } else if running {
                             self.tr("ПОДКЛЮЧЕНО", "CONNECTED")
                         } else if busy {
                             self.tr("ПОДКЛЮЧЕНИЕ", "CONNECTING")
@@ -462,50 +492,70 @@ impl App {
                     })
                     .unwrap_or_else(|| self.tr("Нет профиля", "No profile").to_owned());
                 ui.label(egui::RichText::new(profile).size(22.0).strong());
-                let subtitle = if running {
+                let subtitle: String = if disconnecting {
+                    self.tr("Отключение…", "Disconnecting…").to_owned()
+                } else if running {
                     if shared.tun_active {
-                        self.tr("Весь трафик идёт через VPN", "All traffic is routed through the VPN")
+                        self.tr("Весь трафик идёт через VPN", "All traffic is routed through the VPN").to_owned()
+                    } else if self.store.settings.system_proxy {
+                        let addr = shared.http_proxy.as_deref().unwrap_or("");
+                        format!("{} · http://{addr}", self.tr("Системный прокси", "System proxy"))
                     } else {
                         self.tr(
-                            "Системный прокси направлен на локальный SOCKS5",
-                            "System proxy points at the local SOCKS5",
+                            "Системный прокси выключен в настройках",
+                            "System proxy is disabled in settings",
                         )
+                        .to_owned()
                     }
                 } else {
                     self.tr(
                         "Выберите профиль и нажмите «Подключить»",
                         "Pick a profile and press Connect",
                     )
+                    .to_owned()
                 };
-                theme::hint(ui, subtitle);
+                theme::hint(ui, &subtitle);
                 ui.add_space(14.0);
 
-                let (fill, label) = if running {
+                let (fill, label, color) = if disconnecting {
+                    (
+                        theme::AMBER.gamma_multiply(0.18),
+                        self.tr("Отключение…", "Disconnecting…"),
+                        theme::AMBER,
+                    )
+                } else if running {
                     (
                         theme::RED.gamma_multiply(0.18),
                         self.tr("Отключить", "Disconnect"),
+                        theme::RED,
                     )
                 } else if busy {
                     (
                         theme::CARD_HOVER,
                         self.tr("Подключение…", "Connecting…"),
+                        theme::TEXT,
                     )
                 } else {
                     (
                         theme::ACCENT.gamma_multiply(0.22),
                         self.tr("Подключить", "Connect"),
+                        theme::TEXT,
                     )
                 };
                 let button = egui::Button::new(
                     egui::RichText::new(label)
                         .size(19.0)
                         .strong()
-                        .color(if running { theme::RED } else { theme::TEXT }),
+                        .color(color),
                 )
                 .fill(fill)
                 .stroke(egui::Stroke::new(
                     1.0,
-                    if running { theme::RED } else { theme::ACCENT },
+                    if !running && !disconnecting {
+                        theme::ACCENT
+                    } else {
+                        color
+                    },
                 ))
                 .corner_radius(14)
                 .min_size(egui::vec2(ui.available_width(), 56.0));
@@ -1364,6 +1414,15 @@ impl eframe::App for App {
                     self.toast(self.tr("Подписки обновлены", "Subscriptions refreshed"))
                 }
                 _ => self.toast(notice),
+            }
+        }
+
+        if self.reconnect_after_disconnect {
+            let shared = self.shared.lock();
+            if !shared.busy && !shared.running {
+                drop(shared);
+                self.reconnect_after_disconnect = false;
+                self.connect();
             }
         }
     }

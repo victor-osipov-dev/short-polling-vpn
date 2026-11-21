@@ -73,6 +73,9 @@ struct RunArgs {
     /// SOCKS5 listen address override
     #[arg(long)]
     socks: Option<String>,
+    /// HTTP CONNECT proxy listen address override
+    #[arg(long)]
+    http: Option<String>,
     /// Control API listen address override
     #[arg(long)]
     control: Option<String>,
@@ -252,6 +255,7 @@ async fn run(cli: Cli, dir: PathBuf) -> Result<()> {
                 RunArgs {
                     profile: None,
                     socks: None,
+                    http: None,
                     control: None,
                     no_tui: true,
                 },
@@ -353,6 +357,7 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
         );
     }
 
+    let http_listen = resolved.settings.http_listen.clone();
     let tunnel = Tunnel::new(resolved, &dir.join("cache")).await?;
     let running = Arc::new(AtomicBool::new(true));
     let socks_listener = bind_listener(&socks, "SOCKS5").await?;
@@ -371,10 +376,17 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
     let handle = tunnel.start();
 
     let socks_task = tokio::spawn(spvpn::socks::serve_listener(socks_listener, tunnel.clone()));
+
+    let http = args.http.clone().unwrap_or(http_listen);
+    let http_listener = bind_listener(&http, "HTTP proxy").await?;
+    let actual_http = http_listener.local_addr()?.to_string();
+    let http_task = tokio::spawn(spvpn::http_proxy::serve_listener(http_listener, tunnel.clone()));
+
     let control_task = {
         let ctx = ControlCtx {
             tunnel: tunnel.clone(),
             socks: actual_socks.clone(),
+            http: actual_http.clone(),
             shutdown: shutdown.clone(),
             stopping: stopping.clone(),
         };
@@ -402,6 +414,7 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
     let state = StateFile {
         pid: std::process::id(),
         socks: actual_socks.clone(),
+        http: actual_http.clone(),
         control: actual_control.clone(),
         profile: tunnel.profile_name.clone(),
         started_at: spvpn::subscription::now_secs(),
@@ -418,6 +431,7 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
             if vpn_mode { "VPN (TUN)" } else { "Proxy (SOCKS5)" }
         );
         println!("  SOCKS5  : {actual_socks}");
+        println!("  HTTP    : {actual_http}");
         println!("  control : {actual_control}");
         println!("  press Ctrl+C to stop");
     }
@@ -430,6 +444,7 @@ async fn cmd_run(dir: &std::path::Path, args: RunArgs, json: bool) -> Result<()>
     tracing::info!("shutting down");
     running.store(false, Ordering::Release);
     socks_task.abort();
+    http_task.abort();
     control_task.abort();
     #[cfg(all(feature = "gui", windows))]
     if let Some(tun) = tun.take() {
