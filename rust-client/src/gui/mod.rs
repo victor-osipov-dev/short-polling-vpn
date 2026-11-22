@@ -454,15 +454,24 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(20, 8)),
             )
             .show(root, |ui| {
+                // Keep the navigation untouched; drop the title/version when
+                // the window is too narrow to fit both without overlapping.
+                let show_title = ui.available_width() >= 780.0;
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(self.tr("Интернет", "Internet")).size(18.0).strong());
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(format!("v{}", crate::VERSION))
-                            .size(11.0)
-                            .color(theme::MUTED),
-                    );
-                    ui.add_space(8.0);
+                    if show_title {
+                        ui.label(
+                            egui::RichText::new(self.tr("Интернет", "Internet"))
+                                .size(18.0)
+                                .strong(),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!("v{}", crate::VERSION))
+                                .size(11.0)
+                                .color(theme::MUTED),
+                        );
+                        ui.add_space(8.0);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::nav_button(ui, "EN", self.lang == Lang::En) {
                             self.lang = Lang::En;
