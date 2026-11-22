@@ -95,8 +95,8 @@ pub fn run(dir: PathBuf, minimized: bool) -> Result<()> {
             .unwrap_or(false);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([430.0, 700.0])
-            .with_min_inner_size([390.0, 560.0])
+            .with_inner_size([1100.0, 760.0])
+            .with_min_inner_size([860.0, 600.0])
             .with_title(title)
             .with_icon(egui::IconData {
                 rgba: icon_rgba(64),
@@ -449,8 +449,9 @@ impl App {
             .exact_size(54.0)
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BG)
-                    .inner_margin(egui::Margin::symmetric(16, 10)),
+                    .fill(theme::HEADER)
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                    .inner_margin(egui::Margin::symmetric(20, 8)),
             )
             .show(root, |ui| {
                 ui.horizontal(|ui| {
@@ -463,19 +464,13 @@ impl App {
                     );
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .selectable_label(self.lang == Lang::En, "EN")
-                            .clicked()
-                        {
+                        if theme::nav_button(ui, "EN", self.lang == Lang::En) {
                             self.lang = Lang::En;
                             self.store.settings.ui_language = "en".into();
                             self.save();
                             self.tray = Tray::new(self.lang, self.shared.lock().running);
                         }
-                        if ui
-                            .selectable_label(self.lang == Lang::Ru, "RU")
-                            .clicked()
-                        {
+                        if theme::nav_button(ui, "RU", self.lang == Lang::Ru) {
                             self.lang = Lang::Ru;
                             self.store.settings.ui_language = "ru".into();
                             self.save();
@@ -491,7 +486,7 @@ impl App {
     }
 
     fn nav_button(&mut self, ui: &mut egui::Ui, page: Page, text: &str) {
-        if ui.selectable_label(self.page == page, text).clicked() {
+        if theme::nav_button(ui, text, self.page == page) {
             self.page = page;
         }
     }
@@ -519,31 +514,22 @@ impl App {
                     } else {
                         theme::MUTED
                     };
-                    theme::pill(
-                        ui,
-                        if disconnecting {
-                            self.tr("ОТКЛЮЧЕНИЕ", "DISCONNECTING")
+                    let pill_text = if disconnecting {
+                            format!("● {}", self.tr("Отключение", "Disconnecting"))
                         } else if running {
-                            self.tr("ПОДКЛЮЧЕНО", "CONNECTED")
+                            format!("● {}", self.tr("Подключено", "Connected"))
                         } else if busy {
-                            self.tr("ПОДКЛЮЧЕНИЕ", "CONNECTING")
-                        } else {
-                            self.tr("ОТКЛЮЧЕНО", "DISCONNECTED")
-                        },
-                        color,
-                    );
+                            format!("● {}", self.tr("Подключение", "Connecting"))
+                    } else {
+                        format!("● {}", self.tr("Отключено", "Disconnected"))
+                    };
+                    theme::pill(ui, &pill_text, color);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mode = self.active_profile_mode();
-                        if ui
-                            .selectable_label(mode == "proxy", self.tr("Прокси", "Proxy"))
-                            .clicked()
-                        {
+                        if theme::nav_button(ui, self.tr("Прокси", "Proxy"), mode == "proxy") {
                             self.set_active_mode("proxy");
                         }
-                        if ui
-                            .selectable_label(mode == "vpn", "VPN")
-                            .clicked()
-                        {
+                        if theme::nav_button(ui, "VPN", mode == "vpn") {
                             self.set_active_mode("vpn");
                         }
                     });
@@ -562,7 +548,11 @@ impl App {
                             })
                     })
                     .unwrap_or_else(|| self.tr("Нет профиля", "No profile").to_owned());
-                ui.label(egui::RichText::new(profile).size(22.0).strong());
+                ui.label(
+                    egui::RichText::new(format!("[{}]  {}", country_code(&profile), profile))
+                        .size(21.0)
+                        .strong(),
+                );
                 let subtitle: String = if disconnecting {
                     self.tr("Отключение…", "Disconnecting…").to_owned()
                 } else if running {
@@ -615,7 +605,7 @@ impl App {
                 };
                 let button = egui::Button::new(
                     egui::RichText::new(label)
-                        .size(19.0)
+                        .size(17.0)
                         .strong()
                         .color(color),
                 )
@@ -693,7 +683,7 @@ impl App {
                     &mut cols[1],
                     self.tr("Трафик", "Traffic"),
                     &format!(
-                        "↑{}  ↓{}",
+                        "↑{} ↓{}",
                         human_bytes(status.tx_bytes),
                         human_bytes(status.rx_bytes)
                     ),
@@ -739,18 +729,15 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(self.tr("Профили", "Profiles")).size(16.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(self.tr("+ Подписка", "+ Subscription"))
-                    .clicked()
-                {
+                if theme::tool_button(ui, &self.tr("+ Подписка", "+ Subscription")) {
                     self.add_open = !self.add_open;
                     self.add_focus_pending = self.add_open;
                 }
-                if ui.button(self.tr("Обновить", "Refresh")).clicked() {
+                if theme::tool_button(ui, &self.tr("Обновить", "Refresh")) {
                     self.backend.refresh_subscriptions();
                     self.toast(self.tr("Обновление подписок…", "Refreshing subscriptions…"));
                 }
-                if ui.button(self.tr("Тест всех", "Test all")).clicked() {
+                if theme::tool_button(ui, self.tr("Тест всех", "Test all")) {
                     self.test_profiles(true, None);
                     ui.ctx().request_repaint();
                 }
@@ -953,7 +940,7 @@ impl App {
                         row_clicked = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button(self.tr("Тест", "Test")).clicked() {
+                        if theme::tool_button(ui, self.tr("Тест", "Test")) {
                             test_clicked = true;
                             *test = Some(id.to_owned());
                         }
@@ -1795,6 +1782,26 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.backend.disconnect_blocking();
+    }
+}
+
+/// Small flag emoji for the active profile name, when we recognise the country.
+fn country_code(name: &str) -> &'static str {
+    let n = name.to_lowercase();
+    if n.contains("финлянд") {
+        "FI"
+    } else if n.contains("герман") {
+        "DE"
+    } else if n.contains("япон") {
+        "JP"
+    } else if n.contains("польш") {
+        "PL"
+    } else if n.contains("нидерланд") || n.contains("голланд") {
+        "NL"
+    } else if n.contains("росси") {
+        "RU"
+    } else {
+        "VPN"
     }
 }
 
