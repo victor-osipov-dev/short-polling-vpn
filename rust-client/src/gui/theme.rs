@@ -131,6 +131,17 @@ pub fn tool_button(ui: &mut egui::Ui, text: &str) -> bool {
     .clicked()
 }
 
+/// Compact destructive action button (e.g. remove a subscription).
+pub fn danger_button(ui: &mut egui::Ui, text: &str) -> bool {
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).size(12.0).color(RED))
+            .fill(egui::Color32::TRANSPARENT)
+            .stroke(egui::Stroke::new(1.0, RED.gamma_multiply(0.45)))
+            .corner_radius(9),
+    )
+    .clicked()
+}
+
 pub fn pill(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::NONE
         .fill(color.gamma_multiply(0.16))

@@ -96,7 +96,7 @@ pub fn run(dir: PathBuf, minimized: bool) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 760.0])
-            .with_min_inner_size([860.0, 600.0])
+            .with_min_inner_size([380.0, 560.0])
             .with_title(title)
             .with_icon(egui::IconData {
                 rgba: icon_rgba(64),
@@ -816,10 +816,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(sub_name).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .small_button(self.tr("Удалить", "Remove"))
-                        .clicked()
-                    {
+                    if theme::danger_button(ui, self.tr("Удалить", "Remove")) {
                         remove = Some(sub_id.clone());
                     }
                 });
@@ -1258,7 +1255,7 @@ impl App {
                         theme::hint(ui, &source);
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button(self.tr("Удалить", "Remove")).clicked() {
+                        if theme::danger_button(ui, self.tr("Удалить", "Remove")) {
                             self.store.remove_subscription(&id);
                             changed = true;
                         }
@@ -1266,10 +1263,7 @@ impl App {
                 });
             }
             ui.add_space(4.0);
-            if ui
-                .button(self.tr("Обновить все", "Refresh all"))
-                .clicked()
-            {
+            if theme::tool_button(ui, self.tr("Обновить все", "Refresh all")) {
                 self.backend.refresh_subscriptions();
             }
         });
