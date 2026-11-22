@@ -901,7 +901,10 @@ impl App {
     ) {
         let checking = pending.iter().any(|item| item == test_key);
         let result = tests.iter().find(|r| r.profile == test_key);
-        egui::Frame::NONE
+        let mut test_rect: Option<egui::Rect> = None;
+        let mut test_clicked = false;
+        let mut row_clicked = false;
+        let inner = egui::Frame::NONE
             .fill(if id == active {
                 theme::ACCENT.gamma_multiply(0.08)
             } else {
@@ -914,14 +917,6 @@ impl App {
             .corner_radius(12)
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                let card_click = ui.interact(
-                    rect,
-                    text_id(&format!("profile-select-{id}")),
-                    egui::Sense::click(),
-                );
-                let mut test_clicked = false;
-                let mut row_clicked = false;
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     if ui.radio(id == active, "").clicked() {
@@ -937,7 +932,9 @@ impl App {
                         row_clicked = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::tool_button(ui, self.tr("Тест", "Test")) {
+                        let test_button = theme::tool_button_response(ui, self.tr("Тест", "Test"));
+                        test_rect = Some(test_button.rect);
+                        if test_button.clicked() {
                             test_clicked = true;
                             *test = Some(id.to_owned());
                         }
@@ -981,10 +978,26 @@ impl App {
                         }
                     }
                 }
-                if (card_click.clicked() || row_clicked) && !test_clicked {
-                    *select = Some(id.to_owned());
-                }
             });
+        // Register ONE click area over the whole card, after its content, so
+        // empty space anywhere in the card (including the bottom) is covered.
+        // The Test button is excluded by pointer position.
+        let card_click = ui.interact(
+            inner.response.rect,
+            text_id(&format!("profile-select-{id}")),
+            egui::Sense::click(),
+        );
+        if card_click.clicked() || row_clicked {
+            let test_hit = card_click
+                .interact_pointer_pos()
+                .and_then(|pos| test_rect.map(|rect| rect.contains(pos)))
+                .unwrap_or(false);
+            if test_hit || test_clicked {
+                *test = Some(id.to_owned());
+            } else {
+                *select = Some(id.to_owned());
+            }
+        }
         ui.add_space(2.0);
     }
 

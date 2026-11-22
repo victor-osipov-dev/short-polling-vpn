@@ -122,13 +122,18 @@ pub fn nav_button(ui: &mut egui::Ui, text: &str, active: bool) -> bool {
 
 /// Compact toolbar button used above the profile list.
 pub fn tool_button(ui: &mut egui::Ui, text: &str) -> bool {
+    tool_button_response(ui, text).clicked()
+}
+
+/// Same button as [`tool_button`], but returns the full response so callers
+/// can inspect its rectangle (used to exclude the Test button from card clicks).
+pub fn tool_button_response(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(egui::RichText::new(text).size(12.0).color(TEXT))
             .fill(egui::Color32::TRANSPARENT)
             .stroke(egui::Stroke::new(1.0, BORDER))
             .corner_radius(9),
     )
-    .clicked()
 }
 
 /// Compact destructive action button (e.g. remove a subscription).
