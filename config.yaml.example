@@ -39,8 +39,14 @@ client:
     bind_port: 8888
   server_url: "https://YOUR_SERVER_IP:8443"
   poll_path: "/poll"          # путь VPN-ручки (можно сменить для маскировки)
-  poll_interval_ms: 200
+  poll_interval_ms: 200        # активный режим: есть трафик
+  poll_idle_ms: 800            # простой: трафик был > poll_active_window_ms назад
+  poll_min_ms: 100             # нижняя граница: не чаще, чем раз в 100 мс (CDN)
+  poll_active_window_ms: 1500  # сколько мс после последнего пакета считаем активностью
+  poll_coalesce_ms: 10         # склейка NEW и первых данных в один полл
   poll_jitter_ms: 50
+  poll_retry: 2                # повторы, если соединение не установилось (без дублей)
+  poll_timeout_s: 8            # предел ожидания ответа на один полл
   pad_polls: true              # добивать пустые poll-запросы случайным padding
   max_chunk_bytes: 4096
   url_fail_limit: 3            # ошибок подряд до отправки URL в карантин
@@ -67,6 +73,11 @@ server:
   dns_resolver: "8.8.8.8"    # куда сервер пересылает DNS-запросы (IP или hostname)
   dns_resolver_port: 53
   admin_service_url: "http://127.0.0.1:8444"  # необязательно: /sub/<token> проксируется в панель
+  # Необязательно: выход через локальные SOCKS5-прокси по id последнего hop-а.
+  # Нужно для маршрутов вида «Россия -> внешний VLESS-узел»: xray поднимает
+  # локальный mixed-inbound в нужный outbound, сервер открывает соединения там.
+  egress_proxies:
+    xhttp-pl: "127.0.0.1:1101"   # id hop-а: адрес SOCKS5
   tls:
     cert: "/path/to/fullchain.pem"
     key: "/path/to/privkey.pem"

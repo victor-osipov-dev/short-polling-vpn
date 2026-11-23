@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.VpnService
+import android.net.Uri
 import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.compose.animation.animateColorAsState
@@ -66,13 +67,36 @@ import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
 
 data class LogEntry(val id: Long, val text: String)
+
+private fun appVersion(context: Context): String = try {
+    @Suppress("DEPRECATION")
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.1"
+} catch (_: Exception) {
+    "1.0.1"
+}
+
+private fun isNewerVersion(latest: String, current: String): Boolean {
+    fun parts(v: String) = v.split('.').mapNotNull { it.filter { c -> c.isDigit() }.toIntOrNull() }
+    val a = parts(latest)
+    val b = parts(current)
+    for (i in 0 until maxOf(a.size, b.size)) {
+        val x = a.getOrElse(i) { 0 }
+        val y = b.getOrElse(i) { 0 }
+        if (x != y) return x > y
+    }
+    return false
+}
 
 /** Живое состояние URL из Python-движка: включён, карантин, счётчик ошибок. */
 data class UrlRuntimeStatus(
@@ -97,6 +121,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var configManager: ConfigManager
     private var logSeq = 0L
     private val logs = mutableStateListOf<LogEntry>()
+    private val updateAvailable = mutableStateOf<String?>(null)
     private val logReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             intent?.getStringExtra("msg")?.let { msg ->
@@ -205,6 +230,25 @@ class MainActivity : ComponentActivity() {
         ContextCompat.registerReceiver(this, vpnConsentReceiver, IntentFilter("com.vpnproxy.REQUEST_VPN_CONSENT"),
             ContextCompat.RECEIVER_NOT_EXPORTED)
 
+        val prefs = getSharedPreferences("vpnproxy", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("check_updates", true)) {
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val conn = URL("https://api.github.com/repos/victor-osipov-dev/short-polling-vpn/releases/latest")
+                        .openConnection() as HttpURLConnection
+                    conn.connectTimeout = 8000
+                    conn.readTimeout = 8000
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    val tag = JSONObject(body).optString("tag_name").removePrefix("v")
+                    if (tag.isNotEmpty() && isNewerVersion(tag, appVersion(this@MainActivity))) {
+                        withContext(Dispatchers.Main) { updateAvailable.value = tag }
+                    }
+                } catch (_: Exception) {
+                    // Network may be unavailable — never block the UI for this.
+                }
+            }
+        }
+
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -222,6 +266,7 @@ class MainActivity : ComponentActivity() {
                 )
             ) {
                 MainScreen(configManager, logs, isRunning, urlStatus.value)
+                UpdateDialog(updateAvailable.value) { updateAvailable.value = null }
             }
         }
     }
@@ -421,6 +466,16 @@ fun HomeScreen(
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
             )
+            val activeTest = active?.id?.let { ProfileTester.results[it] }
+            if (activeTest != null && activeTest.ok == true && activeTest.latencyMs > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${activeTest.latencyMs} ms",
+                    color = Color(0xFF7BE495),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
 
             Spacer(Modifier.height(30.dp))
             SubscriptionCard(
@@ -562,7 +617,7 @@ private fun SubscriptionCard(
 private fun HomeHeader(onOpenSettings: () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("Short Polling VPN", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(tr("Internet", "Интернет"), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Text(tr("Secure tunnel", "Защищённый туннель"),
                  color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
         }
@@ -924,6 +979,50 @@ private fun serverHost(url: String): String = try {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+fun UpdateDialog(version: String?, onDismiss: () -> Unit) {
+    if (version == null) return
+    val context = LocalContext.current
+    val prefs = context.getSharedPreferences("vpnproxy", Context.MODE_PRIVATE)
+    var checkUpdates by remember {
+        mutableStateOf(prefs.getBoolean("check_updates", true))
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr("Update available", "Доступно обновление")) },
+        text = {
+            Column {
+                Text("v${appVersion(context)} → v$version")
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = checkUpdates,
+                        onCheckedChange = {
+                            checkUpdates = it
+                            prefs.edit().putBoolean("check_updates", it).apply()
+                        }
+                    )
+                    Text(tr("Check for updates", "Проверять обновления"))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val intent = Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://github.com/victor-osipov-dev/short-polling-vpn/releases/latest")
+                )
+                context.startActivity(intent)
+                onDismiss()
+            }) { Text(tr("Download", "Скачать")) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("OK") }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 fun SettingsScreen(
     configManager: ConfigManager,
     logs: SnapshotStateList<LogEntry>,
@@ -937,6 +1036,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
 ) {
     var autoScroll by remember { mutableStateOf(true) }
+    val context = LocalContext.current
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -982,6 +1082,12 @@ fun SettingsScreen(
                 1 -> SimpleConfigTab(configManager, urlStatus, isRunning, onResetUrlErrors)
                 2 -> LogTab(logs, autoScroll, { autoScroll = it })
             }
+            Text(
+                "Internet v${appVersion(context)}",
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+            )
         }
     }
 }

@@ -5,7 +5,7 @@
   - ClientSession — состояние одной локальной TCP-сессии
   - ClientTunnel — базовый класс туннеля (сессии, пуллинг, DNS relay, URL selection)
 
-Используется desktop_client.py, client.py и android proxy_engine.py.
+Используется client.py (эталонный CLI) и android proxy_engine.py (своя копия).
 """
 
 import asyncio
@@ -94,29 +94,26 @@ class ClientTunnel:
         self.url_cooldown_seconds = max(1, int(client_cfg.get("url_cooldown_seconds", 60)))
         self._all_q_logged = False
         self.poll_path = client_cfg.get("poll_path", "/poll")
-        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
-        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
+        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 100))
+        self.poll_idle_ms = int(client_cfg.get("poll_idle_ms", 800))
+        self.poll_min_ms = int(client_cfg.get("poll_min_ms", 100))
+        self.poll_active_window_ms = int(client_cfg.get("poll_active_window_ms", 1500))
+        self.poll_coalesce_ms = int(client_cfg.get("poll_coalesce_ms", 10))
+        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 5))
         self.pad_polls = bool(client_cfg.get("pad_polls", True))
+        self.poll_retry = max(0, int(client_cfg.get("poll_retry", 2)))
+        self.poll_timeout_s = float(client_cfg.get("poll_timeout_s", 8.0))
         self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
         self.poll_method = client_cfg.get("poll_method", "POST").upper()
         self.poll_data_in = client_cfg.get("poll_data_in", "body")
         self.host_header = client_cfg.get("host_header") or None
         verify_tls = client_cfg.get("verify_tls", True)
         trust_env = client_cfg.get("trust_env_proxy", False)
-        # Привязка исходящих poll-запросов к IP физического адаптера. Нужна
-        # в TUN-режиме: там default-route уходит в TUN, и без привязки наши
-        # же запросы к серверу заворачивались бы в собственный туннель.
-        self.local_address = str(client_cfg.get("local_address") or "").strip() or None
-        # TUN-режим: имена узлов превращаем в IP заранее (до поднятия TUN),
-        # иначе getaddrinfo пойдёт через виртуальный DNS tun2proxy и вернёт
-        # fake-IP, который снова уедет в TUN. SNI/Host при этом остаются
-        # настоящими, поэтому TLS и проверка Host не ломаются.
-        self.tun_resolve = bool(client_cfg.get("tun_resolve", False))
-        self._host_ip: dict[str, str] = {}
 
-        # Per-user режим: пользователь и устройство из подписки. Ключи в этом
-        # режиме выводятся из секрета пользователя, поэтому общий PSK может
-        # быть пустым/плейсхолдером — не трогаем его раньше времени.
+        self.enc_key = derive_key(sec_cfg["psk"].strip())
+        self.hmac_key = derive_hmac_key(sec_cfg["psk"].strip())
+
+        # Per-user режим: пользователь и устройство из подписки.
         user_cfg = cfg.get("user") or {}
         self.user_id = str(user_cfg.get("uuid") or "").strip()
         self.device_id = str(user_cfg.get("device_id") or "").strip()
@@ -131,15 +128,6 @@ class ClientTunnel:
         else:
             self.user_id = ""
             self.device_id = ""
-            psk = str(sec_cfg.get("psk") or "").strip()
-            try:
-                self.enc_key = derive_key(psk)
-                self.hmac_key = derive_hmac_key(psk)
-            except Exception as exc:
-                raise ValueError(
-                    "invalid security.psk (must be base64 of 32 bytes) and no "
-                    f"per-user secret in subscription: {exc}"
-                ) from exc
 
         idle_cfg = client_cfg.get("idle_timeout", {})
         self.idle_timeout_enabled = idle_cfg.get("enabled", False)
@@ -153,10 +141,7 @@ class ClientTunnel:
         # задерживать poll-цикл (read timeout длинный для long-poll).
         self.http = httpx.AsyncClient(
             http2=True, verify=verify_tls, trust_env=trust_env,
-            transport=httpx.AsyncHTTPTransport(
-                verify=verify_tls, trust_env=trust_env,
-                local_address=self.local_address, retries=0),
-            timeout=httpx.Timeout(15.0, connect=4.0))
+            timeout=httpx.Timeout(self.poll_timeout_s, connect=min(4.0, self.poll_timeout_s)))
         self._stop = False
 
         # Смещение времени своё для каждого URL: часы серверов могут
@@ -181,20 +166,10 @@ class ClientTunnel:
         self._dns_task = None
         self._poll_count = 0
         self._health_inflight: set[str] = set()
-
-        self._on_log = None
+        self._url_rtt: dict = {}
+        self._wake = asyncio.Event()
 
         logger.info("client_id=%s", self.client_id.hex())
-
-    def set_log_callback(self, cb):
-        """Подписывает GUI/вызывающий код на сообщения туннеля."""
-        self._on_log = cb
-
-    def log(self, msg: str):
-        if self._on_log:
-            self._on_log(msg)
-        else:
-            logger.info(msg)
 
     def apply_config(self, cfg: dict):
         """Применяет новые настройки из config.yaml без перезапуска.
@@ -225,9 +200,15 @@ class ClientTunnel:
         self.url_cooldown_seconds = max(1, int(client_cfg.get("url_cooldown_seconds", 60)))
         self._all_q_logged = False
         self.poll_path = client_cfg.get("poll_path", "/poll")
-        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 200))
-        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 50))
+        self.poll_interval_ms = int(client_cfg.get("poll_interval_ms", 100))
+        self.poll_idle_ms = int(client_cfg.get("poll_idle_ms", 800))
+        self.poll_min_ms = int(client_cfg.get("poll_min_ms", 100))
+        self.poll_active_window_ms = int(client_cfg.get("poll_active_window_ms", 1500))
+        self.poll_coalesce_ms = int(client_cfg.get("poll_coalesce_ms", 10))
+        self.poll_jitter_ms = int(client_cfg.get("poll_jitter_ms", 5))
         self.pad_polls = bool(client_cfg.get("pad_polls", True))
+        self.poll_retry = max(0, int(client_cfg.get("poll_retry", 2)))
+        self.poll_timeout_s = float(client_cfg.get("poll_timeout_s", 8.0))
         self.max_chunk_bytes = int(client_cfg.get("max_chunk_bytes", 4096))
         self.poll_method = client_cfg.get("poll_method", "POST").upper()
         self.poll_data_in = client_cfg.get("poll_data_in", "body")
@@ -256,6 +237,7 @@ class ClientTunnel:
         async with self.lock:
             self.sessions[sid] = sess
         self._last_activity = time.monotonic()
+        self._wake.set()
         logger.debug("new session %s -> %s:%s", sid.hex()[:8], host, port)
         return sid
 
@@ -265,12 +247,14 @@ class ClientTunnel:
             if sess:
                 sess.outgoing.extend(data)
         self._last_activity = time.monotonic()
+        self._wake.set()
 
     async def mark_closed(self, sid: bytes):
         async with self.lock:
             sess = self.sessions.get(sid)
             if sess:
                 sess.closed = True
+        self._wake.set()
 
     # ── DNS relay ──
 
@@ -315,6 +299,7 @@ class ClientTunnel:
     async def _enqueue_dns_frame(self, frame: Frame):
         async with self.lock:
             self._dns_outbox.append(frame)
+        self._wake.set()
 
     def _prune_dns_pending(self):
         now = time.monotonic()
@@ -359,69 +344,16 @@ class ClientTunnel:
         pool = self._available_urls()
         if not pool:
             return ""
-        if len(pool) == 1 or self.server_selector == "random":
+        if len(pool) == 1:
+            return pool[0]
+        if self.server_selector == "fastest":
+            # Новое подключение — на узел с наименьшим измеренным RTT.
+            return min(pool, key=lambda u: self._url_rtt.get(u, 1e9))
+        if self.server_selector == "random":
             return random.choice(pool)
         base = pool[self._rr_index % len(pool)]
         self._rr_index += 1
         return base
-
-    def url_status(self) -> list[dict]:
-        """Снимок состояния URL для UI: включён, карантин, счётчик ошибок."""
-        now = time.time()
-        status = []
-        for url in self.all_server_urls:
-            until = self._url_cooldown_until.get(url, 0)
-            quarantined = until > now
-            status.append({
-                "url": url,
-                "enabled": url not in self.disabled_urls,
-                "quarantined": quarantined,
-                "cooldown_remaining": max(0, int(round(until - now))) if quarantined else 0,
-                "errors": int(self._url_failures.get(url, 0)),
-            })
-        return status
-
-    def reset_url_status(self) -> None:
-        """Сбрасывает счётчики ошибок и карантин всех URL."""
-        self._url_failures.clear()
-        self._url_cooldown_until.clear()
-        self._all_q_logged = False
-        logger.info("URL error counters and quarantines reset")
-
-    def set_disabled_urls(self, disabled) -> None:
-        """Обновляет список выключенных URL на лету (без перезапуска)."""
-        self.disabled_urls = {str(u).rstrip("/") for u in (disabled or []) if u}
-        self.server_urls = [u for u in self.all_server_urls if u not in self.disabled_urls]
-        self._no_url_warned = False
-
-    def resolve_host_ips(self) -> dict[str, str]:
-        """Заранее резолвит хосты узлов в IPv4 (для TUN-режима).
-
-        Вызывать ДО поднятия TUN: пока действует обычный маршрут, имена
-        разрешаются физическим DNS. Результат уходит в _host_ip, и poll-
-        запросы идут на IP с настоящими SNI/Host.
-        """
-        import socket as _socket
-        from urllib.parse import urlparse as _urlparse
-        mapping: dict[str, str] = {}
-        for base in self.all_server_urls:
-            try:
-                host = _urlparse(base).hostname
-            except Exception:
-                host = None
-            if not host:
-                continue
-            try:
-                infos = _socket.getaddrinfo(host, None, _socket.AF_INET, _socket.SOCK_STREAM)
-            except Exception as exc:
-                logger.debug("resolve %s failed: %s", host, exc)
-                continue
-            if infos:
-                mapping[base] = infos[0][4][0]
-        self._host_ip = mapping
-        if mapping:
-            logger.info("tun_resolve: resolved %d node URL(s) to IPs", len(mapping))
-        return mapping
 
     # ── Polling loop ──
 
@@ -489,11 +421,40 @@ class ClientTunnel:
                 await self._poll_once()
             except Exception as e:
                 logger.warning("poll error: %s", e)
-            jitter = random.randint(-self.poll_jitter_ms, self.poll_jitter_ms)
-            delay_ms = max(10, self.poll_interval_ms + jitter)
-            await asyncio.sleep(delay_ms / 1000)
+            await self._wait_poll(self._poll_delay_ms() / 1000)
+
+    def _poll_delay_ms(self) -> int:
+        """Адаптивный интервал: часто при активности, редко в простое.
+
+        Диапазон задаётся конфигом: poll_interval_ms (активно) …
+        poll_idle_ms (простой), но не чаще poll_min_ms.
+        """
+        active = bool(self.sessions) or any(
+            s.outgoing or s.pending_new is not None for s in self.sessions.values())
+        if not active:
+            idle_ms = (time.monotonic() - self._last_activity) * 1000.0
+            active = idle_ms < self.poll_active_window_ms
+        base = self.poll_interval_ms if active else self.poll_idle_ms
+        base = max(base, self.poll_min_ms)
+        jitter = random.randint(-self.poll_jitter_ms, self.poll_jitter_ms)
+        return max(10, base + jitter)
+
+    async def _wait_poll(self, delay: float) -> None:
+        """Ждёт новый трафик, но не дольше delay.
+
+        Без этого новый запрос после простоя ждал бы весь idle-интервал.
+        """
+        self._wake.clear()
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
 
     async def _poll_once(self):
+        # Склейка: дать первым данным (ClientHello) догнать кадр NEW и уйти
+        # одним поллом — экономит целый round-trip на подключении.
+        if any(s.pending_new is not None for s in self.sessions.values()):
+            await asyncio.sleep(self.poll_coalesce_ms / 1000)
         groups: dict[tuple[str, tuple[str, ...]], list] = defaultdict(list)
         async with self.lock:
             dead_sids = []
@@ -526,7 +487,10 @@ class ClientTunnel:
                 live_bases = sorted({sess.server_base or self.server_base
                                      for sess in self.sessions.values()})
                 for frame in self._dns_outbox:
-                    base = (random.choice(live_bases) if live_bases
+                    # Приоритет живому узлу с наименьшим RTT: DNS не должен
+                    # ждать самый медленный хоп.
+                    base = (min(live_bases, key=lambda u: self._url_rtt.get(u, 1e9))
+                            if live_bases
                             else self._pick_server_base() or self.server_base)
                     groups[(base, ())].append(frame)
                 self._dns_outbox = []
@@ -577,8 +541,10 @@ class ClientTunnel:
 
     async def _poll_base(self, url_base: str, frames_to_send,
                          route: tuple[str, ...] = (),
-                         timeout: float | None = None) -> None:
+                         timeout: float | None = None,
+                         attempt: int = 0) -> None:
         """Один poll-запрос к конкретному входному URL."""
+        started = time.monotonic()
         if self.pad_polls:
             frames_to_send = pad_frames(frames_to_send)
         batch = pack_frames(frames_to_send)
@@ -610,32 +576,14 @@ class ClientTunnel:
         if self.poll_data_in == "header":
             headers["X-Data"] = b64u_encode(blob)
 
-        # В TUN-режиме заменяем host в URL на заранее разрезолвленный IP,
-        # сохраняя SNI и Host настоящими (TLS-сертификат и виртуальный хост
-        # сервера проверяются по имени).
-        extensions = None
-        url = url_base + random_cdn_path(self.poll_path)
-        if self.tun_resolve and url_base in self._host_ip:
-            from urllib.parse import urlparse, urlunparse
-            parsed = urlparse(url_base)
-            sni = parsed.hostname or ""
-            ip = self._host_ip[url_base]
-            netloc = ip + (f":{parsed.port}" if parsed.port else "")
-            new_base = urlunparse((parsed.scheme, netloc, "", "", "", ""))
-            url = new_base + random_cdn_path(self.poll_path)
-            if sni:
-                extensions = {"sni_hostname": sni}
-                headers.setdefault("Host", sni if not parsed.port else f"{sni}:{parsed.port}")
-
         kwargs = {"params": params, "headers": headers}
-        if extensions:
-            kwargs["extensions"] = extensions
         if self.poll_data_in == "body":
             kwargs["content"] = b64u_encode(blob)
         if timeout is not None:
             kwargs["timeout"] = timeout
 
         self._poll_count += 1
+        url = url_base + random_cdn_path(self.poll_path)
         try:
             async with self.http.stream(self.poll_method, url, **kwargs) as resp:
                 if "Date" in resp.headers:
@@ -656,7 +604,7 @@ class ClientTunnel:
                     # вызывался ещё и в except после raise_for_status().
                     self._mark_failure(url_base)
                     logger.error("poll HTTP %s from %s", resp.status_code, url_base)
-                    await self._handle_base_failure(url_base, f"HTTP {resp.status_code}", bool(frames_to_send))
+                    await self._handle_base_failure(url_base, f"HTTP {resp.status_code}", frames_to_send)
                     return
                 ctype = resp.headers.get("Content-Type", "").lower()
                 if "octet-stream" not in ctype:
@@ -666,22 +614,62 @@ class ClientTunnel:
                     logger.warning("unexpected response from %s (%s); check user/device/route",
                                    url_base, ctype or "no content-type")
                     await self._handle_base_failure(url_base, "unexpected content-type",
-                                                    bool(frames_to_send))
+                                                    frames_to_send)
                     return
                 self._mark_success(url_base)
+                rtt_ms = (time.monotonic() - started) * 1000
+                prev = self._url_rtt.get(url_base)
+                self._url_rtt[url_base] = (rtt_ms if prev is None
+                                           else prev * 0.8 + rtt_ms * 0.2)
                 await self._handle_stream_response(resp)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            # Соединение не установилось: данные до сервера не дошли, поэтому
+            # повтор безопасен (без дублей) и не рвёт живые сессии.
+            if attempt < self.poll_retry and frames_to_send:
+                await asyncio.sleep(0.15 * (attempt + 1))
+                return await self._poll_base(url_base, frames_to_send, route,
+                                             timeout, attempt + 1)
+            self._mark_failure(url_base)
+            logger.error("poll connect failed (%s): %s", url_base, e)
+            await self._handle_base_failure(url_base, str(e), frames_to_send)
         except Exception as e:
             self._mark_failure(url_base)
             if "403" not in str(e):
                 logger.error("poll request failed (%s): %s", url_base, e)
-            await self._handle_base_failure(url_base, str(e), bool(frames_to_send))
+            await self._handle_base_failure(url_base, str(e), frames_to_send)
 
-    async def _handle_base_failure(self, url_base: str, reason: str, had_frames: bool) -> None:
-        """Закрывает сессии, закреплённые за упавшим URL, если в запросе
-        были их данные или URL уже ушёл в карантин."""
-        quarantined = self._url_cooldown_until.get(url_base, 0) > time.time()
-        if had_frames or quarantined:
+    async def _handle_base_failure(self, url_base: str, reason: str, frames) -> None:
+        """Закрывает только те сессии, чьи данные потерялись в этом запросе.
+
+        Раньше здесь закрывались ВСЕ сессии, привязанные к URL: один таймаут
+        убивал и чужие долгоживущие соединения (SSE, загрузки), и приложение
+        видело ECONNRESET.
+        """
+        if self._url_cooldown_until.get(url_base, 0) > time.time():
+            # Узел в карантине — сессии на нём всё равно нерабочие.
             await self._fail_base_sessions(url_base, reason)
+            return
+        affected = {f.session_id for f in frames
+                    if (f.flags & (FLAG_NEW | FLAG_DATA | FLAG_FIN))}
+        if affected:
+            await self._fail_sessions(affected, url_base, reason)
+
+    async def _fail_sessions(self, sids, url_base: str, reason: str) -> None:
+        closed = 0
+        async with self.lock:
+            for sid in list(sids):
+                sess = self.sessions.pop(sid, None)
+                if sess is None:
+                    continue
+                closed += 1
+                self._fin_outbox.append((sess.server_base, sid))
+                try:
+                    sess.writer.close()
+                except Exception:
+                    pass
+        if closed:
+            logger.warning("closed %d session(s) with lost data on %s (%s)",
+                           closed, url_base, reason)
 
     async def _fail_base_sessions(self, url_base: str, reason: str) -> None:
         closed = 0

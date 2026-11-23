@@ -18,6 +18,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import logging
 import re
 import socket
@@ -221,6 +222,57 @@ def fake_response(request) -> web.Response:
               '<h1>404 Not Found</h1><p>The requested URL was not found on '
               'this server.</p></center></body></html>'),
     )
+
+
+async def socks5_open(proxy: str, host: str, port: int, timeout: float = 10):
+    """Открыть TCP-соединение к host:port через SOCKS5-прокси (без авторизации).
+
+    Используется для выхода через внешние VLESS-узлы: на сервере крутится
+    xray с локальными socks-inbound'ами, каждый из которых смотрит в свой
+    outbound. proxy задаётся строкой "127.0.0.1:1101".
+    """
+    phost, _, pport = proxy.rpartition(":")
+    if not phost or not pport.isdigit():
+        raise OSError("bad socks5 proxy address %r" % proxy)
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(phost.strip("[]"), int(pport)), timeout=timeout)
+    try:
+        writer.write(b"\x05\x01\x00")
+        await writer.drain()
+        if await reader.readexactly(2) != b"\x05\x00":
+            raise OSError("socks5: proxy requires authentication")
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            ip = None
+        if isinstance(ip, ipaddress.IPv4Address):
+            addr = b"\x01" + ip.packed
+        elif isinstance(ip, ipaddress.IPv6Address):
+            addr = b"\x04" + ip.packed
+        else:
+            name = host.encode("idna")
+            if len(name) > 255:
+                raise OSError("socks5: hostname too long")
+            addr = b"\x03" + bytes([len(name)]) + name
+        writer.write(b"\x05\x01\x00" + addr + struct.pack("!H", int(port)))
+        await writer.drain()
+        head = await reader.readexactly(4)
+        if head[0] != 5 or head[1] != 0:
+            raise OSError("socks5: connect rejected (code %d)" % head[1])
+        atyp = head[3]
+        if atyp == 1:
+            await reader.readexactly(4)
+        elif atyp == 3:
+            await reader.readexactly((await reader.readexactly(1))[0])
+        elif atyp == 4:
+            await reader.readexactly(16)
+        else:
+            raise OSError("socks5: bad address type %d" % atyp)
+        await reader.readexactly(2)
+        return reader, writer
+    except BaseException:
+        writer.close()
+        raise
 
 
 async def relay_forward(app, request: web.Request, route: list[str],
@@ -434,7 +486,7 @@ class SessionManager:
         if not items:
             yield dns_resolver, dns_port
 
-    async def handle_incoming(self, client_id: bytes, frames):
+    async def handle_incoming(self, client_id: bytes, frames, egress: str = None):
         cid = client_id.hex()[:8]
         async with self.lock:
             self.last_seen[client_id] = time.monotonic()
@@ -448,7 +500,8 @@ class SessionManager:
                 logger.info(f"[server] NEW: client {cid} -> session {sid} (target {host}:{port})")
                 async with self.lock:
                     self._pending_opens.setdefault(client_id, set()).add(f.session_id)
-                asyncio.create_task(self._open_remote(client_id, f.session_id, host, port))
+                asyncio.create_task(self._open_remote(client_id, f.session_id, host, port,
+                                                     egress))
             elif f.flags & FLAG_DNS:
                 logger.debug(f"[server] DNS: client {cid} query {len(f.payload)}B (sid {sid})")
                 asyncio.create_task(self._resolve_dns(client_id, f.session_id, f.payload))
@@ -489,10 +542,16 @@ class SessionManager:
                             self._pending_data.setdefault(client_id, {}).setdefault(f.session_id, []).append(None)
                             logger.debug(f"[server] FIN: buffered for pending session {sid}")
 
-    async def _open_remote(self, client_id: bytes, session_id: bytes, host: str, port: int):
-        logger.debug(f"[server] attempting to connect to {host}:{port}")
+    async def _open_remote(self, client_id: bytes, session_id: bytes, host: str, port: int,
+                           egress: str = None):
+        logger.debug(f"[server] attempting to connect to {host}:{port}"
+                     + (f" via {egress}" if egress else ""))
         try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
+            if egress:
+                connect = socks5_open(egress, host, port)
+            else:
+                connect = asyncio.open_connection(host, port)
+            reader, writer = await asyncio.wait_for(connect, timeout=10)
         except asyncio.TimeoutError:
             logger.error(f"[server] timeout connecting to {host}:{port}")
             self._cleanup_pending(client_id, session_id)
@@ -786,6 +845,7 @@ async def poll_handler(request: web.Request):
     node_id = app.get("node_id") or ""
     node_ids = [node_id] + [str(alias) for alias in
                             (app.get("node_aliases") or []) if alias]
+    egress = None
     if route:
         idx = next((i for i, hop in enumerate(route) if hop in node_ids), -1)
         if idx < 0:
@@ -820,10 +880,16 @@ async def poll_handler(request: web.Request):
                     logger.warning("403 bad relay signature from %s for %s", relay_id, route)
                 return fake_response(request)
         if idx < len(route) - 1:
-            if not (app.get("relay_secret") and app.get("peers")):
-                return fake_response(request)
-            return await relay_forward(app, request, route, route[idx + 1],
-                                       read_body, route[idx])
+            proxies = app.get("egress_proxies") or {}
+            if route[idx + 1] in proxies:
+                # Следующий hop — внешний VLESS-узел (xray socks). Кадры
+                # обрабатываем локально, но соединения открываем через прокси.
+                egress = proxies[route[idx + 1]]
+            else:
+                if not (app.get("relay_secret") and app.get("peers")):
+                    return fake_response(request)
+                return await relay_forward(app, request, route, route[idx + 1],
+                                           read_body, route[idx])
         # idx == len(route)-1 — это exit, обрабатываем кадры локально.
 
     try:
@@ -834,7 +900,7 @@ async def poll_handler(request: web.Request):
             logger.warning("400 bad payload: %s", e)
         return web.Response(status=400, text="bad payload")
 
-    await mgr.handle_incoming(session_client, frames)
+    await mgr.handle_incoming(session_client, frames, egress=egress)
     out_frames = await mgr.collect_outgoing(session_client)
 
     if request.headers.get("X-Proto", "1") == PROTO_VERSION:
@@ -872,6 +938,10 @@ def build_app(cfg: dict) -> web.Application:
     client_max = max(max_chunk * 3, 16 * 1024 * 1024)
 
     app = web.Application(client_max_size=client_max)
+    app["egress_proxies"] = {
+        str(k): str(v) for k, v in (server_cfg.get("egress_proxies") or {}).items()
+        if k and v
+    }
     app["enc_key"] = derive_key(sec_cfg["psk"])
     app["hmac_key"] = derive_hmac_key(sec_cfg["psk"])
     app["hmac_window_seconds"] = int(sec_cfg.get("hmac_window_seconds", 30))
