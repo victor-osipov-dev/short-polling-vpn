@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
+use reqwest::StatusCode;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use url::Url;
 
 use crate::routing::Decision;
 use crate::tunnel::{Down, Session, Tunnel};
@@ -33,13 +35,40 @@ const DNS_TTL_MIN: u32 = 30;
 const DNS_TTL_MAX: u32 = 3600;
 const DNS_DEFAULT_TTL: u32 = 300;
 
+/// How the built-in DNS proxy forwards queries to the outside world.
+#[derive(Clone, Debug)]
+pub enum DnsUpstream {
+    /// Plain UDP (with TCP fallback for truncated responses).
+    Udp(SocketAddr),
+    /// DNS-over-HTTPS (RFC 8484).
+    Https(Url),
+}
+
+impl DnsUpstream {
+    fn from_config(value: &str) -> Self {
+        let trimmed = value.trim();
+        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            if let Ok(url) = Url::parse(trimmed) {
+                return DnsUpstream::Https(url);
+            }
+            tracing::warn!("invalid DoH URL {trimmed:?}, falling back to 1.1.1.1:53");
+        } else {
+            if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+                return DnsUpstream::Udp(addr);
+            }
+            tracing::warn!("invalid DNS upstream {trimmed:?}, falling back to 1.1.1.1:53");
+        }
+        DnsUpstream::Udp(SocketAddr::from(([1, 1, 1, 1], 53)))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TunConfig {
     pub address: Ipv4Addr,
     pub netmask: Ipv4Addr,
     pub dns: Ipv4Addr,
     pub mtu: usize,
-    pub dns_upstream: SocketAddr,
+    pub dns_upstream: DnsUpstream,
     /// IPv4 prefixes kept on the physical route (direct split routing, local
     /// resources, custom exclusions).
     pub exclusions: Vec<ipnet::Ipv4Net>,
@@ -59,10 +88,7 @@ impl TunConfig {
             .tun_dns
             .parse()
             .unwrap_or(Ipv4Addr::new(10, 7, 0, 53));
-        let dns_upstream = settings
-            .tun_dns_upstream
-            .parse()
-            .unwrap_or_else(|_| SocketAddr::from(([1, 1, 1, 1], 53)));
+        let dns_upstream = DnsUpstream::from_config(&settings.tun_dns_upstream);
         let mut exclusions = Vec::new();
         for value in &settings.tun_exclude {
             let value = value.trim();
@@ -85,6 +111,56 @@ impl TunConfig {
             dns_upstream,
             exclusions,
         })
+    }
+}
+
+/// Runtime wrapper that dispatches DNS queries to either UDP or HTTPS.
+#[derive(Clone, Debug)]
+enum DnsResolver {
+    Udp {
+        upstream: SocketAddr,
+        bind_ip: Option<Ipv4Addr>,
+    },
+    Https {
+        client: reqwest::Client,
+        url: Url,
+    },
+}
+
+impl DnsResolver {
+    /// Build a resolver from the parsed upstream configuration and the
+    /// physical-adapter IP that was discovered at TUN start time.
+    fn new(upstream: &DnsUpstream, bind_ip: Option<Ipv4Addr>) -> Result<Self> {
+        match upstream {
+            DnsUpstream::Udp(addr) => Ok(DnsResolver::Udp {
+                upstream: *addr,
+                bind_ip,
+            }),
+            DnsUpstream::Https(url) => {
+                let mut builder = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .connect_timeout(Duration::from_secs(5))
+                    .https_only(url.scheme() == "https")
+                    .use_rustls_tls();
+                if let Some(ip) = bind_ip {
+                    builder = builder.local_address(IpAddr::V4(ip));
+                }
+                let client = builder.build().context("cannot build DoH HTTP client")?;
+                Ok(DnsResolver::Https { client, url: url.clone() })
+            }
+        }
+    }
+
+    /// Resolve a wire-format DNS query and return the raw response.
+    async fn resolve(&self, query: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            DnsResolver::Udp { upstream, bind_ip } => {
+                dns_query(query, *upstream, *bind_ip).await
+            }
+            DnsResolver::Https { client, url } => {
+                dns_https_query(query, client, url).await
+            }
+        }
     }
 }
 
@@ -323,6 +399,11 @@ impl TunRuntime {
         // Find the physical adapter's local address before the TUN routes are
         // installed; the DNS proxy binds to it so only that socket goes direct.
         let dns_bind_ip = gateway.and_then(physical_local_ipv4);
+
+        // Build the DNS resolver (UDP or DoH) once and share it.
+        let resolver = DnsResolver::new(&config.dns_upstream, dns_bind_ip)
+            .context("cannot build DNS resolver")?;
+
         let mut routes = Routes::new(index);
         let gateway_label = gateway
             .map(|ip| ip.to_string())
@@ -440,16 +521,14 @@ impl TunRuntime {
             cache.clone(),
             running.clone(),
             config.dns,
-            config.dns_upstream,
-            dns_bind_ip,
+            resolver.clone(),
             gateway,
             direct_routes.clone(),
         ));
         let dns_task = tokio::spawn(udp_loop(
             udp,
             cache,
-            config.dns_upstream,
-            dns_bind_ip,
+            resolver,
             running.clone(),
         ));
 
@@ -509,8 +588,7 @@ async fn accept_loop(
     cache: Arc<DomainCache>,
     running: Arc<AtomicBool>,
     dns: Ipv4Addr,
-    dns_upstream: SocketAddr,
-    dns_bind_ip: Option<Ipv4Addr>,
+    resolver: DnsResolver,
     gateway: Option<Ipv4Addr>,
     direct_routes: Arc<Mutex<HashSet<Ipv4Addr>>>,
 ) {
@@ -534,6 +612,7 @@ async fn accept_loop(
                 continue;
             }
         };
+        let resolver = resolver.clone();
         let tunnel = tunnel.clone();
         let cache = cache.clone();
         let direct_routes = direct_routes.clone();
@@ -542,7 +621,7 @@ async fn accept_loop(
             // Only the address we advertised as DNS is treated as DNS; port 53
             // may legitimately host other services.
             if remote.port() == 53 && remote.ip() == IpAddr::V4(dns) {
-                if let Err(err) = dns_tcp(stream, dns_upstream, dns_bind_ip, &cache).await {
+                if let Err(err) = dns_tcp(stream, &resolver, &cache).await {
                     tracing::debug!("DNS/TCP: {err:#}");
                 }
                 return;
@@ -704,8 +783,7 @@ async fn relay<S>(
 async fn udp_loop(
     udp: netstack_smoltcp::UdpSocket,
     cache: Arc<DomainCache>,
-    upstream: SocketAddr,
-    bind_ip: Option<Ipv4Addr>,
+    resolver: DnsResolver,
     running: Arc<AtomicBool>,
 ) {
     let (mut reader, writer) = udp.split();
@@ -720,8 +798,9 @@ async fn udp_loop(
         }
         let cache = cache.clone();
         let writer = writer.clone();
+        let resolver = resolver.clone();
         tokio::spawn(async move {
-            match dns_query(&payload, upstream, bind_ip).await {
+            match resolver.resolve(&payload).await {
                 Ok(response) => {
                     learn_dns(&response, &cache);
                     let mut guard = writer.lock().await;
@@ -807,10 +886,36 @@ async fn dns_tcp_query(
     Ok(response)
 }
 
+/// Forward a wire-format DNS query via DNS-over-HTTPS (RFC 8484).
+///
+/// The raw query bytes are POSTed as `application/dns-message` to the
+/// configured DoH endpoint.  The response body is the raw DNS answer,
+/// which the caller's `learn_dns` can parse.
+async fn dns_https_query(
+    query: &[u8],
+    client: &reqwest::Client,
+    url: &Url,
+) -> Result<Vec<u8>> {
+    let response = client
+        .post(url.clone())
+        .header("Content-Type", "application/dns-message")
+        .header("Accept", "application/dns-message")
+        .body(query.to_vec())
+        .send()
+        .await
+        .context("DoH request failed")?;
+
+    if response.status() != StatusCode::OK {
+        anyhow::bail!("DoH returned HTTP {}", response.status());
+    }
+
+    let body = response.bytes().await.context("DoH response body read failed")?;
+    Ok(body.to_vec())
+}
+
 async fn dns_tcp(
     mut stream: netstack_smoltcp::TcpStream,
-    upstream: SocketAddr,
-    bind_ip: Option<Ipv4Addr>,
+    resolver: &DnsResolver,
     cache: &DomainCache,
 ) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(15), async move {
@@ -822,7 +927,7 @@ async fn dns_tcp(
         }
         let mut query = vec![0u8; size];
         stream.read_exact(&mut query).await?;
-        let response = dns_tcp_query(&query, upstream, bind_ip).await?;
+        let response = resolver.resolve(&query).await?;
         // DNS-over-TCP answers must teach the split-routing cache too.
         learn_dns(&response, cache);
         let mut framed = Vec::with_capacity(response.len() + 2);

@@ -64,7 +64,11 @@ pub struct Settings {
     pub tun_netmask: String,
     pub tun_dns: String,
     pub tun_mtu: usize,
-    /// DNS used by the built-in resolver (`ip:port`, UDP).
+    /// DNS used by the built-in resolver.
+    ///
+    /// Two formats are accepted:
+    /// - `"ip:port"` — plain UDP (with TCP fallback), e.g. `1.1.1.1:53`
+    /// - `"https://..."` — DNS-over-HTTPS (RFC 8484), e.g. `https://dns.google/dns-query`
     pub tun_dns_upstream: String,
     /// Additional IPv4 destinations that must bypass the tunnel.
     pub tun_exclude: Vec<String>,
