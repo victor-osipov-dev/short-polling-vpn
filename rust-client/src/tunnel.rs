@@ -213,7 +213,7 @@ impl Tunnel {
             tracing::warn!("rules refresh failed: {err:#}");
         }
         let ruleset = crate::routing::Ruleset::load(cache_dir, &resolved.split);
-        let router = Router::new(
+        let mut router = Router::new(
             resolved.split.clone(),
             ruleset,
             resolved.nodes.clone(),
@@ -221,6 +221,9 @@ impl Tunnel {
             resolved.urls.clone(),
             &settings.selector,
         );
+        router.set_policy(crate::policy::Policy::compile(
+            &resolved.settings.routing_rules,
+        ));
         let poll_interval = Duration::from_millis(settings.poll_interval_ms.max(5));
         let poll_idle = Duration::from_millis(settings.poll_idle_ms.max(5)).max(HEALTH_INTERVAL);
         let poll_min = Duration::from_millis(settings.poll_min_ms.max(5));
@@ -300,6 +303,19 @@ impl Tunnel {
         self.router.route_for(host, &self.available_urls())
     }
 
+    /// Routes a TUN connection with the destination address and the owning
+    /// process, so `ip` and `process` rules can match.
+    pub fn route_tun(&self, host: &str, ip: IpAddr, process: Option<&str>) -> Decision {
+        self.router
+            .route_with(host, Some(ip), process, &self.available_urls())
+    }
+
+    /// True when at least one enabled rule matches on the process name; the
+    /// TUN loop uses it to skip the (relatively expensive) process lookup.
+    pub fn has_process_rules(&self) -> bool {
+        self.router.has_process_rules()
+    }
+
     fn available_urls(&self) -> HashSet<String> {
         let now = Instant::now();
         let mut cooldowns = self.cooldowns.lock();
@@ -347,6 +363,7 @@ impl Tunnel {
                 entry, chain, ..
             } => (entry, chain),
             Decision::Direct => anyhow::bail!("direct connections are not tunnel sessions"),
+            Decision::Block(reason) => anyhow::bail!("blocked by {reason}"),
             Decision::Error(reason) => anyhow::bail!("{reason}"),
         };
         let sid = crate::crypto::random_id();

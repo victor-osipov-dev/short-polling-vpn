@@ -33,6 +33,13 @@ enum Page {
 /// blocks share one width and do not stretch across a wide window.
 const CONTENT_WIDTH: f32 = 560.0;
 
+/// DoH endpoints offered as one-click presets in the settings.
+const DOH_PRESETS: &[(&str, &str)] = &[
+    ("Google", "https://8.8.8.8/dns-query"),
+    ("Cloudflare", "https://cloudflare-dns.com/dns-query"),
+    ("Quad9", "https://9.9.9.9/dns-query"),
+];
+
 /// Stable ids for every editable text field, so Ctrl+C/Ctrl+V can find the
 /// focused field even though winit does not deliver the usual clipboard events.
 const TEXT_SUB_URL: &str = "text-sub-url";
@@ -44,6 +51,10 @@ const TEXT_TUN_DNS: &str = "text-tun-dns";
 const TEXT_TUN_DNS_UPSTREAM: &str = "text-tun-dns-upstream";
 const TEXT_TUN_EXCLUDE: &str = "text-tun-exclude";
 
+fn rule_text_id(index: usize) -> egui::Id {
+    text_id(&format!("rule-value-{index}"))
+}
+
 #[derive(Clone, Copy)]
 enum TextTarget {
     SubUrl,
@@ -54,6 +65,7 @@ enum TextTarget {
     TunDns,
     TunDnsUpstream,
     TunExclude,
+    RuleValue(usize),
 }
 
 fn text_id(name: &str) -> egui::Id {
@@ -1220,15 +1232,84 @@ impl App {
                         .add(egui::DragValue::new(&mut self.store.settings.tun_mtu).range(576..=9000))
                         .changed();
                     ui.end_row();
-                    ui.label(self.tr("DNS-сервер", "DNS upstream"));
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.store.settings.tun_dns_upstream)
-                                .id(text_id(TEXT_TUN_DNS_UPSTREAM))
-                                .desired_width(180.0),
-                        )
-                        .changed();
+                    ui.label("DNS-over-HTTPS");
+                    let mut doh = self.store.settings.doh_enabled();
+                    if ui.checkbox(&mut doh, "").changed() {
+                        let previous = self.store.settings.tun_dns_upstream.trim().to_owned();
+                        if doh {
+                            if !previous.is_empty()
+                                && !previous.to_ascii_lowercase().starts_with("https://")
+                            {
+                                self.store.settings.tun_udp_upstream = previous;
+                            }
+                            let url = self.store.settings.tun_doh_url.trim().to_owned();
+                            self.store.settings.tun_dns_upstream = if url.is_empty() {
+                                crate::store::DEFAULT_DOH_URL.to_owned()
+                            } else {
+                                url
+                            };
+                        } else {
+                            if previous.to_ascii_lowercase().starts_with("https://") {
+                                self.store.settings.tun_doh_url = previous;
+                            }
+                            let udp = self.store.settings.tun_udp_upstream.trim().to_owned();
+                            self.store.settings.tun_dns_upstream =
+                                if udp.is_empty() || udp.starts_with("https://") {
+                                    crate::store::DEFAULT_UDP_UPSTREAM.to_owned()
+                                } else {
+                                    udp
+                                };
+                        }
+                        changed = true;
+                    }
                     ui.end_row();
+                    ui.label(self.tr("DNS-сервер", "DNS upstream"));
+                    let dns_edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.store.settings.tun_dns_upstream)
+                            .id(text_id(TEXT_TUN_DNS_UPSTREAM))
+                            .hint_text(if doh {
+                                "https://8.8.8.8/dns-query"
+                            } else {
+                                "1.1.1.1:53"
+                            })
+                            .desired_width(180.0),
+                    );
+                    if dns_edit.changed() {
+                        changed = true;
+                        if self.store.settings.doh_enabled() {
+                            self.store.settings.tun_doh_url =
+                                self.store.settings.tun_dns_upstream.clone();
+                        } else {
+                            self.store.settings.tun_udp_upstream =
+                                self.store.settings.tun_dns_upstream.clone();
+                        }
+                    }
+                    ui.end_row();
+                    if self.store.settings.doh_enabled() {
+                        ui.label(self.tr("DoH-провайдер", "DoH provider"));
+                        let current = self.store.settings.tun_dns_upstream.trim().to_owned();
+                        let selected = DOH_PRESETS
+                            .iter()
+                            .find(|(_, url)| *url == current.as_str())
+                            .map(|(name, _)| *name)
+                            .unwrap_or_else(|| self.tr("Свой", "Custom"));
+                        egui::ComboBox::from_id_salt("doh_preset")
+                            .selected_text(selected)
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                for (name, url) in DOH_PRESETS {
+                                    if ui
+                                        .selectable_label(current.as_str() == *url, *name)
+                                        .clicked()
+                                    {
+                                        self.store.settings.tun_dns_upstream = (*url).to_owned();
+                                        self.store.settings.tun_doh_url = (*url).to_owned();
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        ui.end_row();
+                    }
                     ui.label(self.tr("Исключения", "Exclusions"));
                     let mut text = self.store.settings.tun_exclude.join(", ");
                     if ui
@@ -1250,7 +1331,18 @@ impl App {
                     }
                     ui.end_row();
                 });
+            ui.add_space(4.0);
+            theme::hint(
+                ui,
+                self.tr(
+                    "DoH и правила маршрутизации применяются после переподключения.",
+                    "DoH and routing rules apply after reconnecting.",
+                ),
+            );
         });
+
+        ui.add_space(10.0);
+        self.routing_rules(ui, &mut changed);
 
         ui.add_space(10.0);
         self.split_settings(ui, &mut changed);
@@ -1297,6 +1389,184 @@ impl App {
                     self.toast(format!("{err:#}"));
                 }
             }
+        }
+    }
+
+    /// Editor for the ordered custom routing rules. The list is global (not
+    /// per profile) and is evaluated before the split routing below.
+    fn routing_rules(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
+        let lang = self.lang;
+        theme::section_title(ui, lang.t("Правила маршрутизации", "Routing rules"));
+        let routes = self.store.route_names();
+        let mut remove: Option<usize> = None;
+        let mut move_up: Option<usize> = None;
+        let mut move_down: Option<usize> = None;
+        theme::card_ui(ui, |ui| {
+            theme::hint(
+                ui,
+                lang.t(
+                    "Проверяются сверху вниз, первое совпадение выигрывает. Если ни одно правило не совпало, работает раздельное маршрутизирование ниже.",
+                    "Checked top to bottom; the first match wins. If nothing matches, split routing below applies.",
+                ),
+            );
+            theme::hint(
+                ui,
+                lang.t(
+                    "Правила по процессу работают в режиме VPN при выключенном системном прокси.",
+                    "Process rules work in VPN mode with the system proxy off.",
+                ),
+            );
+            ui.add_space(4.0);
+            let count = self.store.settings.routing_rules.len();
+            for i in 0..count {
+                {
+                    let rule = &mut self.store.settings.routing_rules[i];
+                    ui.horizontal(|ui| {
+                        *changed |= ui.checkbox(&mut rule.enabled, "").changed();
+                        egui::ComboBox::from_id_salt(("rule_kind", i))
+                            .width(108.0)
+                            .selected_text(kind_label(&rule.kind, lang))
+                            .show_ui(ui, |ui| {
+                                for (value, ru, en) in [
+                                    ("process", "Процесс", "Process"),
+                                    ("domain", "Домен", "Domain"),
+                                    ("ip", "IP / CIDR", "IP / CIDR"),
+                                    ("all", "Всё", "All"),
+                                ] {
+                                    if ui
+                                        .selectable_label(rule.kind == value, lang.t(ru, en))
+                                        .clicked()
+                                    {
+                                        rule.kind = value.to_owned();
+                                        *changed = true;
+                                    }
+                                }
+                            });
+                        if rule.kind != "all" {
+                            let hint = match rule.kind.as_str() {
+                                "process" => "chrome.exe",
+                                "ip" => "1.2.3.0/24",
+                                _ => "example.com",
+                            };
+                            *changed |= ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut rule.value)
+                                        .id(rule_text_id(i))
+                                        .hint_text(hint)
+                                        .desired_width(150.0),
+                                )
+                                .changed();
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if theme::danger_button(ui, "✕") {
+                                    remove = Some(i);
+                                }
+                            },
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(24.0);
+                        egui::ComboBox::from_id_salt(("rule_action", i))
+                            .width(132.0)
+                            .selected_text(action_label(&rule.action, lang))
+                            .show_ui(ui, |ui| {
+                                for (value, ru, en) in [
+                                    ("proxy", "Через VPN", "Through VPN"),
+                                    ("direct", "Напрямую", "Direct"),
+                                    ("block", "Блокировать", "Block"),
+                                ] {
+                                    if ui
+                                        .selectable_label(rule.action == value, lang.t(ru, en))
+                                        .clicked()
+                                    {
+                                        rule.action = value.to_owned();
+                                        *changed = true;
+                                    }
+                                }
+                            });
+                        if rule.action == "proxy" {
+                            let current = rule.route.clone().unwrap_or_default();
+                            let label = if current.is_empty() {
+                                lang.t("Маршрут: по умолчанию", "Route: default")
+                            } else {
+                                current.as_str()
+                            };
+                            egui::ComboBox::from_id_salt(("rule_route", i))
+                                .width(160.0)
+                                .selected_text(label)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            current.is_empty(),
+                                            lang.t("По умолчанию", "Default"),
+                                        )
+                                        .clicked()
+                                    {
+                                        rule.route = None;
+                                        *changed = true;
+                                    }
+                                    for name in &routes {
+                                        if ui
+                                            .selectable_label(
+                                                current.as_str() == name.as_str(),
+                                                name.as_str(),
+                                            )
+                                            .clicked()
+                                        {
+                                            rule.route = Some(name.clone());
+                                            *changed = true;
+                                        }
+                                    }
+                                });
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if i + 1 < count && ui.small_button("↓").clicked() {
+                                    move_down = Some(i);
+                                }
+                                if i > 0 && ui.small_button("↑").clicked() {
+                                    move_up = Some(i);
+                                }
+                            },
+                        );
+                    });
+                }
+                if i + 1 < count {
+                    ui.separator();
+                }
+            }
+            if self.store.settings.routing_rules.is_empty() {
+                theme::hint(
+                    ui,
+                    lang.t(
+                        "Правил пока нет — весь трафик идёт по раздельному маршрутизированию.",
+                        "No rules yet — all traffic uses split routing.",
+                    ),
+                );
+            }
+            ui.add_space(4.0);
+            if theme::tool_button(ui, lang.t("Добавить правило", "Add rule")) {
+                self.store
+                    .settings
+                    .routing_rules
+                    .push(crate::store::RoutingRule::default());
+                *changed = true;
+            }
+        });
+        if let Some(i) = remove {
+            self.store.settings.routing_rules.remove(i);
+            *changed = true;
+        }
+        if let Some(i) = move_up {
+            self.store.settings.routing_rules.swap(i, i - 1);
+            *changed = true;
+        }
+        if let Some(i) = move_down {
+            self.store.settings.routing_rules.swap(i, i + 1);
+            *changed = true;
         }
     }
 
@@ -1465,6 +1735,23 @@ impl App {
     }
 }
 
+fn kind_label(kind: &str, lang: Lang) -> &'static str {
+    match kind {
+        "process" => lang.t("Процесс", "Process"),
+        "ip" => lang.t("IP / CIDR", "IP / CIDR"),
+        "all" => lang.t("Всё", "All"),
+        _ => lang.t("Домен", "Domain"),
+    }
+}
+
+fn action_label(action: &str, lang: Lang) -> &'static str {
+    match action {
+        "direct" => lang.t("Напрямую", "Direct"),
+        "block" => lang.t("Блокировать", "Block"),
+        _ => lang.t("Через VPN", "Through VPN"),
+    }
+}
+
 fn display_split(
     ui: &mut egui::Ui,
     store: &Store,
@@ -1553,6 +1840,10 @@ impl App {
             Some(TextTarget::TunDnsUpstream)
         } else if id == text_id(TEXT_TUN_EXCLUDE) {
             Some(TextTarget::TunExclude)
+        } else if let Some(index) = (0..self.store.settings.routing_rules.len())
+            .find(|index| id == rule_text_id(*index))
+        {
+            Some(TextTarget::RuleValue(index))
         } else {
             None
         };
@@ -1611,6 +1902,11 @@ impl App {
                             .map(str::to_owned)
                             .collect();
                     }
+                }
+            }
+            TextTarget::RuleValue(index) => {
+                if let Some(rule) = self.store.settings.routing_rules.get_mut(index) {
+                    Self::clipboard_on(ctx, &mut rule.value, copy, paste, range);
                 }
             }
         }

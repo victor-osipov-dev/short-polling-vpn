@@ -631,7 +631,7 @@ async fn accept_loop(
 ) {
     let slots = Arc::new(tokio::sync::Semaphore::new(MAX_TUN_CONNECTIONS));
     while running.load(Ordering::Acquire) {
-        let Some((stream, _local, remote)) = listener.next().await else {
+        let Some((stream, local, remote)) = listener.next().await else {
             break;
         };
         if remote.is_ipv6() {
@@ -653,6 +653,14 @@ async fn accept_loop(
         let tunnel = tunnel.clone();
         let cache = cache.clone();
         let direct_routes = direct_routes.clone();
+        // Process rules need the owning executable, which is found through the
+        // local port of the intercepted connection. Skip the lookup when no
+        // rule uses it.
+        let process = if tunnel.has_process_rules() {
+            crate::policy::process_for_port(local.port())
+        } else {
+            None
+        };
         tokio::spawn(async move {
             let _permit = permit;
             // Only the address we advertised as DNS is treated as DNS; port 53
@@ -672,7 +680,7 @@ async fn accept_loop(
             let decision = if is_entry {
                 Decision::Direct
             } else {
-                tunnel.route(&host)
+                tunnel.route_tun(&host, remote.ip(), process.as_deref())
             };
             match decision {
                 Decision::Direct => {
@@ -731,6 +739,14 @@ async fn accept_loop(
                             tracing::warn!("TUN open {}:{}: {err:#}", host, remote.port())
                         }
                     }
+                }
+                Decision::Block(reason) => {
+                    tracing::info!(
+                        "TUN {}:{} blocked by {reason}",
+                        host,
+                        remote.port()
+                    );
+                    // Dropping the stream resets the connection.
                 }
                 Decision::Error(reason) => {
                     tracing::warn!("TUN {host}:{remote}: {reason}");

@@ -185,6 +185,7 @@ fn describe_reqwest_error(err: &reqwest::Error) -> String {
 pub fn describe(decision: Decision) -> String {
     match decision {
         Decision::Direct => "direct".into(),
+        Decision::Block(reason) => format!("blocked: {reason}"),
         Decision::Error(reason) => format!("error: {reason}"),
         Decision::Tunnel { entry, chain, .. } => {
             if chain.is_empty() {

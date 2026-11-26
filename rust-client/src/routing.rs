@@ -9,6 +9,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::policy::{Policy, RuleAction, TrafficContext};
 use crate::store::{Hop, Node, RouteDef, SplitConfig};
 
 pub const MAX_HOPS: usize = 3;
@@ -235,6 +236,8 @@ pub async fn refresh_rules(
 #[derive(Clone, Debug)]
 pub enum Decision {
     Direct,
+    /// A custom rule asked to drop the connection.
+    Block(String),
     Tunnel {
         entry: String,
         chain: Vec<String>,
@@ -247,6 +250,7 @@ pub struct Router {
     pub split: SplitConfig,
     pub ruleset: Ruleset,
     pub nodes: Vec<Node>,
+    policy: Policy,
     node_urls: HashMap<String, String>,
     url_nodes: HashMap<String, String>,
     fallback_urls: Vec<String>,
@@ -282,6 +286,7 @@ impl Router {
             split,
             ruleset,
             nodes,
+            policy: Policy::empty(),
             node_urls,
             url_nodes,
             fallback_urls,
@@ -297,16 +302,49 @@ impl Router {
         self.url_nodes.get(url).cloned()
     }
 
+    /// Installs the compiled custom rules. Must be called before the router is
+    /// shared, because the policy is only read afterwards.
+    pub fn set_policy(&mut self, policy: Policy) {
+        self.policy = policy;
+    }
+
+    pub fn has_process_rules(&self) -> bool {
+        self.policy.has_process_rules()
+    }
+
     pub fn route_for(&self, host: &str, available: &HashSet<String>) -> Decision {
-        if !self.split.enabled {
-            return match self.pick_any(available, "global") {
-                Some(entry) => Decision::Tunnel {
-                    entry,
-                    chain: Vec::new(),
-                    category: Category::NonRu,
-                },
-                None => Decision::Error("no reachable entry URL".into()),
+        self.route_with(host, None, None, available)
+    }
+
+    /// Routes one connection, consulting the custom rules first.
+    ///
+    /// `ip` and `process` are optional because the SOCKS/HTTP proxy paths only
+    /// know the host name, while the TUN path knows the destination address and
+    /// the owning process.
+    pub fn route_with(
+        &self,
+        host: &str,
+        ip: Option<IpAddr>,
+        process: Option<&str>,
+        available: &HashSet<String>,
+    ) -> Decision {
+        let ctx = TrafficContext { host, ip, process };
+        if let Some(hit) = self.policy.decide(&ctx) {
+            return match hit.action {
+                RuleAction::Direct => Decision::Direct,
+                RuleAction::Block => Decision::Block(hit.rule),
+                RuleAction::Proxy => {
+                    self.tunnel_via(hit.route.as_deref(), available, Category::NonRu)
+                }
             };
+        }
+        self.split_route(host, available)
+    }
+
+    /// The built-in RU/non-RU split routing, used when no custom rule matches.
+    fn split_route(&self, host: &str, available: &HashSet<String>) -> Decision {
+        if !self.split.enabled {
+            return self.tunnel_via(None, available, Category::NonRu);
         }
         let category = self.ruleset.classify(host);
         let action = self
@@ -315,19 +353,23 @@ impl Router {
             .get(category.as_str())
             .or_else(|| self.split.actions.get(&self.split.default));
         let Some(action) = action else {
-            return match self.pick_any(available, "global") {
-                Some(entry) => Decision::Tunnel {
-                    entry,
-                    chain: Vec::new(),
-                    category,
-                },
-                None => Decision::Error("no reachable entry URL".into()),
-            };
+            return self.tunnel_via(None, available, category);
         };
         if action.direct {
             return Decision::Direct;
         }
-        let Some(route_name) = action.route.as_deref() else {
+        self.tunnel_via(action.route.as_deref(), available, category)
+    }
+
+    /// Builds a tunnel decision, either through the default entry pool or
+    /// through a named route.
+    fn tunnel_via(
+        &self,
+        route: Option<&str>,
+        available: &HashSet<String>,
+        category: Category,
+    ) -> Decision {
+        let Some(route_name) = route else {
             return match self.pick_any(available, "global") {
                 Some(entry) => Decision::Tunnel {
                     entry,
@@ -791,6 +833,48 @@ mod tests {
         assert!(matches!(
             router.route_for("example.com", &available),
             Decision::Error(_)
+        ));
+    }
+
+    #[test]
+    fn custom_rule_overrides_split() {
+        use crate::store::RoutingRule;
+
+        let nodes = nodes();
+        let urls: Vec<String> = nodes.iter().map(|n| n.url.clone()).collect();
+        let mut router = Router::new(
+            split(&[("non_ru", "DE")]),
+            Ruleset::load(Path::new("__missing__"), &SplitConfig::default()),
+            nodes,
+            routes(),
+            urls.clone(),
+            "round",
+        );
+        let available: HashSet<String> = urls.into_iter().collect();
+        let rule = |value: &str, action: &str| RoutingRule {
+            enabled: true,
+            kind: "domain".into(),
+            value: value.into(),
+            action: action.into(),
+            route: None,
+        };
+        router.set_policy(crate::policy::Policy::compile(&[
+            rule("direct.example", "direct"),
+            rule("blocked.example", "block"),
+        ]));
+
+        assert!(matches!(
+            router.route_for("direct.example", &available),
+            Decision::Direct
+        ));
+        assert!(matches!(
+            router.route_for("sub.blocked.example", &available),
+            Decision::Block(_)
+        ));
+        // No rule matches, so the built-in split routing still applies.
+        assert!(matches!(
+            router.route_for("other.example", &available),
+            Decision::Tunnel { .. }
         ));
     }
 

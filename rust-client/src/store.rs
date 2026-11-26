@@ -11,6 +11,12 @@ use crate::crypto::Keys;
 pub const STORE_VERSION: u32 = 1;
 pub const MANUAL_PROFILE_ID: &str = "manual";
 
+/// Default DoH endpoint. An IP literal needs no bootstrap lookup, so it cannot
+/// loop through the TUN DNS proxy.
+pub const DEFAULT_DOH_URL: &str = "https://8.8.8.8/dns-query";
+/// Default plain-UDP resolver used when DoH is switched off.
+pub const DEFAULT_UDP_UPSTREAM: &str = "1.1.1.1:53";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -70,8 +76,54 @@ pub struct Settings {
     /// - `"ip:port"` — plain UDP (with TCP fallback), e.g. `1.1.1.1:53`
     /// - `"https://..."` — DNS-over-HTTPS (RFC 8484), e.g. `https://dns.google/dns-query`
     pub tun_dns_upstream: String,
+    /// Remembered DoH endpoint. Restored when the DoH switch is turned on.
+    pub tun_doh_url: String,
+    /// Remembered plain-UDP resolver. Restored when DoH is turned off.
+    pub tun_udp_upstream: String,
+    /// Ordered custom routing rules. They are evaluated before the built-in
+    /// RU/non-RU split and the first enabled match wins.
+    pub routing_rules: Vec<RoutingRule>,
     /// Additional IPv4 destinations that must bypass the tunnel.
     pub tun_exclude: Vec<String>,
+}
+
+impl Settings {
+    /// DoH is enabled when the live upstream starts with `https://`.
+    pub fn doh_enabled(&self) -> bool {
+        self.tun_dns_upstream
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("https://")
+    }
+}
+
+/// One custom routing rule.
+///
+/// `kind` is one of `process`, `domain`, `ip` or `all`; `action` is one of
+/// `proxy`, `direct` or `block`. `value` holds the process name, domain suffix
+/// or CIDR list (empty for `all`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoutingRule {
+    pub enabled: bool,
+    pub kind: String,
+    pub value: String,
+    pub action: String,
+    /// Named route used by `proxy`; `None` means the default entry pool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+}
+
+impl Default for RoutingRule {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            kind: "domain".into(),
+            value: String::new(),
+            action: "proxy".into(),
+            route: None,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -113,7 +165,10 @@ impl Default for Settings {
             tun_netmask: "255.255.255.0".into(),
             tun_dns: "10.7.0.53".into(),
             tun_mtu: 1400,
-            tun_dns_upstream: "1.1.1.1:53".into(),
+            tun_dns_upstream: DEFAULT_UDP_UPSTREAM.into(),
+            tun_doh_url: DEFAULT_DOH_URL.into(),
+            tun_udp_upstream: DEFAULT_UDP_UPSTREAM.into(),
+            routing_rules: Vec::new(),
             tun_exclude: Vec::new(),
         }
     }
@@ -777,6 +832,33 @@ mod tests {
                 "actions": {"non_ru": {"route": "DE fallback"}, "private": {"direct": true}}
             }
         })
+    }
+
+    #[test]
+    fn old_settings_gain_the_new_fields() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("tun_doh_url");
+        object.remove("tun_udp_upstream");
+        object.remove("routing_rules");
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.tun_doh_url, DEFAULT_DOH_URL);
+        assert_eq!(settings.tun_udp_upstream, DEFAULT_UDP_UPSTREAM);
+        assert!(settings.routing_rules.is_empty());
+        assert!(!settings.doh_enabled());
+
+        let mut doh = settings;
+        doh.tun_dns_upstream = DEFAULT_DOH_URL.into();
+        assert!(doh.doh_enabled());
+    }
+
+    #[test]
+    fn routing_rule_defaults_are_applied() {
+        let rule: RoutingRule = serde_json::from_str(r#"{"value": "example.com"}"#).unwrap();
+        assert!(rule.enabled);
+        assert_eq!(rule.kind, "domain");
+        assert_eq!(rule.action, "proxy");
+        assert!(rule.route.is_none());
     }
 
     #[test]

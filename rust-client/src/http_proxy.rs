@@ -131,6 +131,10 @@ async fn proxy_bytes(
             tracing::warn!("http proxy {peer}: {reason} for {host}:{port}");
             gateway_error(&mut stream, 502, "Bad Gateway", &reason).await
         }
+        Decision::Block(reason) => {
+            tracing::info!("http proxy {peer}: blocked {host}:{port} ({reason})");
+            gateway_error(&mut stream, 403, "Forbidden", &reason).await
+        }
         decision => {
             let (session, down_rx) = tunnel
                 .open(host.clone(), port, decision)

@@ -98,6 +98,12 @@ async fn handle(tunnel: Arc<Tunnel>, mut stream: TcpStream, peer: SocketAddr) ->
             tokio::join!(c2u, u2c);
             Ok(())
         }
+        Decision::Block(reason) => {
+            tracing::info!("socks {peer}: blocked {host}:{port} ({reason})");
+            // 0x02: connection not allowed by ruleset
+            reply(&mut stream, 0x02).await?;
+            Ok(())
+        }
         Decision::Error(reason) => {
             tracing::warn!("socks {peer}: {reason} for {host}:{port}");
             reply(&mut stream, 0x04).await?;

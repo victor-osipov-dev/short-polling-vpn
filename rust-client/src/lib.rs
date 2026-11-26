@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod frame;
 pub mod http_proxy;
 pub mod logging;
+pub mod policy;
 pub mod routing;
 pub mod socks;
 pub mod store;
