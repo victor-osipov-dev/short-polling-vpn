@@ -5,7 +5,7 @@ REM into the client. Stop the VPN cleanly from the client's system-tray
 REM menu (right-click the icon -> Exit). A clean exit removes the TUN
 REM routes; force-killing the process can leave them behind.
 
-set "IMAGE=Short-Polling-VPN-1.0.1.exe"
+set "IMAGE=Short-Polling-VPN-1.1.0.exe"
 
 REM /FO CSV keeps the full image name (the table view truncates it).
 tasklist /FI "IMAGENAME eq %IMAGE%" /FO CSV /NH 2>nul | find /I "%IMAGE%" >nul

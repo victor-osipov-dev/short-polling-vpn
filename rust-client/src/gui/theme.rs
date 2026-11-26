@@ -147,6 +147,66 @@ pub fn danger_button(ui: &mut egui::Ui, text: &str) -> bool {
     .clicked()
 }
 
+/// Small square "remove" icon button. The cross is painted with two lines
+/// instead of a glyph: the bundled Windows UI font has no U+2715 and would
+/// otherwise render a missing-character box.
+pub fn close_button(ui: &mut egui::Ui, tooltip: &str) -> bool {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        let fill = if hovered {
+            RED.gamma_multiply(0.18)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let stroke = if hovered {
+            egui::Stroke::new(1.0, RED.gamma_multiply(0.75))
+        } else {
+            egui::Stroke::new(1.0, BORDER)
+        };
+        ui.painter()
+            .rect(rect, 9, fill, stroke, egui::StrokeKind::Inside);
+        let color = if hovered { RED } else { MUTED };
+        let center = rect.center();
+        let d = 4.0;
+        let line = egui::Stroke::new(1.6, color);
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - d, center.y - d),
+                egui::pos2(center.x + d, center.y + d),
+            ],
+            line,
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - d, center.y + d),
+                egui::pos2(center.x + d, center.y - d),
+            ],
+            line,
+        );
+    }
+    response.on_hover_text(tooltip).clicked()
+}
+
+/// Filled primary button used for the single most important action in a card
+/// (for example "Restart as Administrator").
+pub fn accent_button(ui: &mut egui::Ui, text: &str) -> bool {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(text)
+                .size(12.5)
+                .strong()
+                .color(egui::Color32::WHITE),
+        )
+        .fill(ACCENT)
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(9)
+        .min_size(egui::vec2(0.0, 30.0)),
+    )
+    .clicked()
+}
+
 pub fn pill(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::NONE
         .fill(color.gamma_multiply(0.16))

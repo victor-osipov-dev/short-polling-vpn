@@ -5,7 +5,7 @@ REM DNS-over-HTTPS (RFC 8484) is built into the client, so no sidecar
 REM forwarder is needed. Set the DoH endpoint in the app settings, e.g.
 REM "https://8.8.8.8/dns-query" (an IP literal needs no bootstrap lookup).
 
-set "IMAGE=Short-Polling-VPN-1.0.1.exe"
+set "IMAGE=Short-Polling-VPN-1.1.0.exe"
 set "VPN_EXE=%~dp0%IMAGE%"
 if not exist "%VPN_EXE%" set "VPN_EXE=%USERPROFILE%\Desktop\%IMAGE%"
 

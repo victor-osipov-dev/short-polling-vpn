@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Интернет — соединение для Windows и Android</title>
-<meta name="description" content="Интернет (Internet) 1.0.1 — нативный Rust-клиент и Android-приложение: подписки, профили, тест соединения, системный прокси и VPN/TUN. Скачать APK и EXE.">
+<meta name="description" content="Интернет (Internet) 1.1.0 для Windows и 1.0.1 для Android: нативный Rust-клиент, подписки, профили, тест соединения, DNS-over-HTTPS, правила маршрутизации, системный прокси и VPN/TUN. Скачать APK и EXE.">
 <style>
   :root{
     --bg:#0b0f17; --card:#141a26; --card2:#1b2333; --text:#e8eefc; --muted:#93a1bd;
@@ -78,20 +78,20 @@
   <header>
     <div class="logo">🛡️</div>
     <h1>Интернет</h1>
-    <p class="sub">Интернет соединение 1.0.1 (Internet): нативный Rust-клиент для Windows и Android. Подписки, профили, тест соединения, системный прокси и TUN-режим без sing-box.</p>
+    <p class="sub">Интернет соединение: нативный Rust-клиент <b>1.1.0 для Windows</b> и Android-приложение <b>1.0.1</b>. Подписки, профили, тест соединения, DNS-over-HTTPS, правила маршрутизации, системный прокси и TUN-режим без sing-box.</p>
     <div class="cta">
-      <a class="btn btn-desktop" href="downloads/Short-Polling-VPN-1.0.1.exe" download>
-        💻 Скачать Интернет для Windows
+      <a class="btn btn-desktop" href="downloads/Short-Polling-VPN-1.1.0.exe" download>
+        💻 Скачать Интернет для Windows · 1.1.0
       </a>
       <a class="btn btn-primary" href="downloads/short-polling-vpn-1.0.1.apk" download>
-        ⬇ Скачать Интернет для Android
+        ⬇ Скачать Интернет для Android · 1.0.1
       </a>
       <a id="download-desktop" class="btn btn-ghost" href="https://github.com/victor-osipov-dev/short-polling-vpn/releases">
         Все версии на GitHub
       </a>
       <a class="btn btn-ghost" href="https://github.com/victor-osipov-dev/short-polling-vpn">Исходники на GitHub</a>
     </div>
-    <p class="meta">Internet 1.0.1 · Windows + Android · контрольная сумма EXE: <a href="downloads/SHA256SUMS.txt">SHA-256</a></p>
+    <p class="meta">Windows 1.1.0 · Android 1.0.1 · контрольная сумма EXE и APK: <a href="downloads/SHA256SUMS.txt">SHA-256</a></p>
     <p class="meta" id="latest-meta">Загрузка версий…</p>
     <p class="meta" id="latest-desktop-meta"></p>
   </header>
@@ -125,6 +125,8 @@
       <div class="feat"><b>Интернет на Windows</b><span>Один exe на Rust: GUI, CLI/TUI, подписки, профили, тесты и журнал без Python и Electron.</span></div>
       <div class="feat"><b>Прокси и TUN</b><span>Системный HTTP-прокси с восстановлением настроек и VPN-адаптер на Wintun без sing-box.</span></div>
       <div class="feat"><b>Split-routing</b><span>Маршруты RU/non-RU/private, цепочки реле и список заблокированных доменов.</span></div>
+      <div class="feat"><b>DNS-over-HTTPS</b><span>Встроенный DoH-резолвер с переключателем в настройках и пресетами Google, Cloudflare и Quad9 (Windows).</span></div>
+      <div class="feat"><b>Правила маршрутизации</b><span>Свои правила по процессу, домену или IP/CIDR: через VPN, напрямую или блокировать. Первое совпадение выигрывает (Windows).</span></div>
     </div>
   </section>
 

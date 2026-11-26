@@ -663,16 +663,17 @@ impl App {
                     egui::Frame::NONE
                         .fill(theme::RED.gamma_multiply(0.12))
                         .corner_radius(10)
-                        .inner_margin(egui::Margin::symmetric(10, 8))
+                        .inner_margin(egui::Margin::symmetric(12, 10))
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new(text).size(12.0).color(theme::RED));
-                            if ui
-                                .small_button(self.tr(
+                            ui.add_space(6.0);
+                            if theme::accent_button(
+                                ui,
+                                self.tr(
                                     "Перезапустить от администратора",
                                     "Restart as Administrator",
-                                ))
-                                .clicked()
-                            {
+                                ),
+                            ) {
                                 self.elevate();
                             }
                         });
@@ -1185,12 +1186,13 @@ impl App {
                     if admin { theme::GREEN } else { theme::AMBER },
                 );
                 if !admin
-                    && ui
-                        .small_button(self.tr(
+                    && theme::accent_button(
+                        ui,
+                        self.tr(
                             "Перезапустить от администратора",
                             "Restart as Administrator",
-                        ))
-                        .clicked()
+                        ),
+                    )
                 {
                     self.elevate();
                 }
@@ -1457,14 +1459,14 @@ impl App {
                                 )
                                 .changed();
                         }
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if theme::danger_button(ui, "✕") {
-                                    remove = Some(i);
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if theme::close_button(
+                                ui,
+                                lang.t("Удалить правило", "Remove rule"),
+                            ) {
+                                remove = Some(i);
+                            }
+                        });
                     });
                     ui.horizontal(|ui| {
                         ui.add_space(24.0);
