@@ -130,13 +130,22 @@ enum DnsResolver {
 impl DnsResolver {
     /// Build a resolver from the parsed upstream configuration and the
     /// physical-adapter IP that was discovered at TUN start time.
-    fn new(upstream: &DnsUpstream, bind_ip: Option<Ipv4Addr>) -> Result<Self> {
+    ///
+    /// For DoH the endpoint host is resolved *here*, before the TUN routes are
+    /// installed and before the adapter DNS is pointed at our own proxy.
+    /// Otherwise resolving a name such as `dns.google` would be sent back into
+    /// the very DNS proxy that is waiting for this request (an endless loop).
+    async fn new(upstream: &DnsUpstream, bind_ip: Option<Ipv4Addr>) -> Result<Self> {
         match upstream {
             DnsUpstream::Udp(addr) => Ok(DnsResolver::Udp {
                 upstream: *addr,
                 bind_ip,
             }),
             DnsUpstream::Https(url) => {
+                let host = url
+                    .host_str()
+                    .context("DoH URL has no host")?
+                    .to_owned();
                 let mut builder = reqwest::Client::builder()
                     .timeout(Duration::from_secs(10))
                     .connect_timeout(Duration::from_secs(5))
@@ -145,8 +154,35 @@ impl DnsResolver {
                 if let Some(ip) = bind_ip {
                     builder = builder.local_address(IpAddr::V4(ip));
                 }
+                // Pin a named endpoint to the address it has right now, so the
+                // DoH client never has to ask the (soon to be tunnelled) system
+                // resolver for it again. IP literals need no lookup at all.
+                if host.parse::<IpAddr>().is_err() {
+                    let port = url.port_or_known_default().unwrap_or(443);
+                    match tokio::net::lookup_host((host.as_str(), port)).await {
+                        Ok(addrs) => {
+                            let resolved: Vec<SocketAddr> = addrs.collect();
+                            if let Some(addr) = resolved
+                                .iter()
+                                .find(|addr| addr.is_ipv4())
+                                .or_else(|| resolved.first())
+                            {
+                                tracing::info!("DoH endpoint {host} pinned to {addr}");
+                                builder = builder.resolve(&host, *addr);
+                            } else {
+                                tracing::warn!("DoH endpoint {host} did not resolve");
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!("cannot pre-resolve DoH endpoint {host}: {err:#}");
+                        }
+                    }
+                }
                 let client = builder.build().context("cannot build DoH HTTP client")?;
-                Ok(DnsResolver::Https { client, url: url.clone() })
+                Ok(DnsResolver::Https {
+                    client,
+                    url: url.clone(),
+                })
             }
         }
     }
@@ -362,6 +398,16 @@ impl TunRuntime {
             &config.address.to_string(),
         ])
         .context("cannot set TUN address")?;
+        // Discover the physical gateway and its local address, then build the
+        // DNS resolver *before* the adapter DNS is pointed at our own proxy.
+        // A DoH endpoint given by name must be resolved through the physical
+        // network, not through the TUN proxy that is about to be configured.
+        let gateway = physical_gateway(config.address);
+        let dns_bind_ip = gateway.and_then(physical_local_ipv4);
+        let resolver = DnsResolver::new(&config.dns_upstream, dns_bind_ip)
+            .await
+            .context("cannot build DNS resolver")?;
+
         // Only the IPv4 resolver is advertised: the stack has no IPv6 DNS
         // listener, and a dead IPv6 server would delay every lookup.
         // SetInterfaceDnsSettings does not always show up in the adapter's
@@ -394,15 +440,6 @@ impl TunRuntime {
         let runner = runner.context("netstack runner is missing")?;
         let tcp = tcp.context("netstack TCP listener is missing")?;
         let udp = udp.context("netstack UDP socket is missing")?;
-
-        let gateway = physical_gateway(config.address);
-        // Find the physical adapter's local address before the TUN routes are
-        // installed; the DNS proxy binds to it so only that socket goes direct.
-        let dns_bind_ip = gateway.and_then(physical_local_ipv4);
-
-        // Build the DNS resolver (UDP or DoH) once and share it.
-        let resolver = DnsResolver::new(&config.dns_upstream, dns_bind_ip)
-            .context("cannot build DNS resolver")?;
 
         let mut routes = Routes::new(index);
         let gateway_label = gateway
